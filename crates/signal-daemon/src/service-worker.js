@@ -17,7 +17,7 @@ self.addEventListener('push', function(event) {
   };
 
   event.waitUntil(
-    self.registration.showNotification('Signal', options)
+    self.registration.showNotification(data.title || 'Signal', options)
   );
 });
 

@@ -1,3 +1,4 @@
+use crate::web_push_sender::VapidConfig;
 use signal_core::Storage;
 use std::sync::Arc;
 
@@ -6,14 +7,28 @@ pub struct AppState {
     pub storage: Arc<Storage>,
     pub token: Option<String>,
     pub require_token_for_read: bool,
+    pub enable_web_push: bool,
+    pub vapid_config: Option<VapidConfig>,
 }
 
 impl AppState {
     pub fn new(storage: Arc<Storage>, token: Option<String>, require_token_for_read: bool) -> Self {
+        Self::with_push(storage, token, require_token_for_read, false, None)
+    }
+
+    pub fn with_push(
+        storage: Arc<Storage>,
+        token: Option<String>,
+        require_token_for_read: bool,
+        enable_web_push: bool,
+        vapid_config: Option<VapidConfig>,
+    ) -> Self {
         Self {
             storage,
             token,
             require_token_for_read,
+            enable_web_push,
+            vapid_config,
         }
     }
 
