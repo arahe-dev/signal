@@ -48,7 +48,7 @@ pub fn create_message_event(
     };
     let payload_json = serde_json::to_string(&payload).unwrap_or_default();
     Event::new(
-        "message.created".to_string(),
+        "message_created".to_string(),
         Some(source.to_string()),
         None,
         payload_json,
@@ -64,7 +64,7 @@ pub fn create_reply_event(reply_id: &str, message_id: &str, body: &str, source: 
     };
     let payload_json = serde_json::to_string(&payload).unwrap_or_default();
     Event::new(
-        "reply.created".to_string(),
+        "reply_created".to_string(),
         Some(source.to_string()),
         None,
         payload_json,
@@ -79,7 +79,7 @@ pub fn create_reply_consumed_event(reply_id: &str, message_id: &str, consumed_by
     };
     let payload_json = serde_json::to_string(&payload).unwrap_or_default();
     Event::new(
-        "reply.consumed".to_string(),
+        "reply_consumed".to_string(),
         Some(consumed_by.to_string()),
         None,
         payload_json,

@@ -87,11 +87,59 @@
             color: #86868b;
             margin-top: 16px;
         }
+        .toolbar {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 12px;
+            margin-bottom: 12px;
+        }
+        .message-list {
+            display: grid;
+            gap: 10px;
+        }
+        .message-link {
+            display: block;
+            padding: 14px;
+            border: 1px solid #e5e5ea;
+            border-radius: 10px;
+            color: inherit;
+            text-decoration: none;
+        }
+        .message-row {
+            display: flex;
+            justify-content: space-between;
+            gap: 10px;
+            margin-bottom: 6px;
+        }
+        .message-title {
+            font-weight: 650;
+        }
+        .message-preview, .message-meta {
+            color: #6e6e73;
+            font-size: 13px;
+        }
+        .badge {
+            border-radius: 999px;
+            padding: 2px 8px;
+            font-size: 12px;
+            background: #f2f2f7;
+            white-space: nowrap;
+        }
     </style>
 </head>
 <body>
     <div class="container">
         <h1>Signal PWA</h1>
+
+        <div class="card">
+            <div class="toolbar">
+                <h2>Inbox</h2>
+                <button id="refresh-inbox" class="btn btn-secondary" style="margin-top:0;">Refresh</button>
+            </div>
+            <div id="push-status" class="note">Push: checking...</div>
+            <div id="message-list" class="message-list"></div>
+        </div>
 
         <div class="card" id="notification-card">
             <h2>Notifications</h2>
@@ -123,6 +171,9 @@
 
         const enableBtn = document.getElementById('enable-notifications');
         const statusDiv = document.getElementById('notification-status');
+        const messageList = document.getElementById('message-list');
+        const pushStatus = document.getElementById('push-status');
+        document.getElementById('refresh-inbox').addEventListener('click', loadInbox);
 
         enableBtn.addEventListener('click', async () => {
             if (!('Notification' in window)) {
@@ -253,6 +304,54 @@
                 console.log('Service Worker ready');
             });
         }
+
+        async function loadInbox() {
+            try {
+                const headers = token ? { 'X-Signal-Token': token } : {};
+                const [messagesResponse, pushResponse] = await Promise.all([
+                    fetch('/api/messages?limit=25', { headers }),
+                    fetch('/api/push/status', { headers })
+                ]);
+                if (pushResponse.ok) {
+                    const status = await pushResponse.json();
+                    pushStatus.textContent = 'Push: ' + (status.web_push_enabled ? 'enabled' : 'disabled') +
+                        ', subscriptions: ' + status.subscriptions_count;
+                }
+                if (!messagesResponse.ok) {
+                    messageList.innerHTML = '<div class="status status-error">Unable to load inbox. Check token.</div>';
+                    return;
+                }
+                const messages = await messagesResponse.json();
+                const activeMessages = messages.filter((message) => message.status !== 'archived');
+                if (activeMessages.length === 0) {
+                    messageList.innerHTML = '<div class="note">No active messages.</div>';
+                    return;
+                }
+                messageList.innerHTML = activeMessages.map((message) => {
+                    const href = '/message/' + encodeURIComponent(message.id) + (token ? '?token=' + encodeURIComponent(token) : '');
+                    const meta = [message.source, message.project, message.agent_id].filter(Boolean).join(' / ');
+                    return '<a class="message-link" href="' + href + '">' +
+                        '<div class="message-row"><span class="message-title">' + escapeHtml(message.title) + '</span>' +
+                        '<span class="badge">' + escapeHtml(message.status) + '</span></div>' +
+                        '<div class="message-preview">' + escapeHtml(message.body || '') + '</div>' +
+                        '<div class="message-meta">' + escapeHtml(meta) + '</div>' +
+                        '</a>';
+                }).join('');
+            } catch (error) {
+                messageList.innerHTML = '<div class="status status-error">Inbox error: ' + escapeHtml(error.message) + '</div>';
+            }
+        }
+
+        function escapeHtml(value) {
+            return String(value)
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;')
+                .replace(/'/g, '&#039;');
+        }
+
+        loadInbox();
     </script>
 </body>
 </html>

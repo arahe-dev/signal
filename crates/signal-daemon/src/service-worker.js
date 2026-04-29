@@ -25,9 +25,18 @@ self.addEventListener('notificationclick', function(event) {
   console.log('Notification click:', event);
 
   event.notification.close();
+  const rawUrl = event.notification.data.url || '/';
+  const targetUrl = new URL(rawUrl, self.location.origin).href;
 
   event.waitUntil(
-    clients.openWindow(event.notification.data.url || '/')
+    clients.matchAll({ type: 'window', includeUncontrolled: true }).then(function(clientList) {
+      for (const client of clientList) {
+        if ('focus' in client && client.url === targetUrl) {
+          return client.focus();
+        }
+      }
+      return clients.openWindow(targetUrl);
+    })
   );
 });
 
