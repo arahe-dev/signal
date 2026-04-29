@@ -321,6 +321,7 @@ pub struct PushSubscription {
     pub last_success_at: Option<DateTime<Utc>>,
     pub last_error: Option<String>,
     pub status: String,
+    pub vapid_public_key_hash: Option<String>,
 }
 
 impl PushSubscription {
@@ -337,6 +338,7 @@ impl PushSubscription {
             last_success_at: None,
             last_error: None,
             status: "active".to_string(),
+            vapid_public_key_hash: None,
         }
     }
 }

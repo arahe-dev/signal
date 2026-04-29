@@ -2,11 +2,14 @@ mod api;
 mod app_state;
 mod html;
 mod push;
+mod vapid;
+mod web_push_sender;
 
 use axum::Router;
 use clap::Parser;
 use signal_core::Storage;
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use tracing::{error, info, warn};
@@ -36,6 +39,15 @@ struct Args {
 
     #[arg(long)]
     enable_web_push: bool,
+
+    #[arg(long, default_value = "./signal_vapid.json")]
+    vapid_file: PathBuf,
+
+    #[arg(long, default_value = "mailto:signal@example.local")]
+    vapid_subject: String,
+
+    #[arg(long)]
+    public_base_url: Option<String>,
 }
 
 #[tokio::main]
@@ -86,7 +98,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let push_router = if args.enable_web_push {
         info!("Web Push enabled");
-        push::create_push_router(storage.clone(), true)
+        let vapid_keys = vapid::load_or_generate_vapid_keys(&args.vapid_file)?;
+        let diagnostics = vapid::get_diagnostics(&vapid_keys.public_key)?;
+        info!(
+            "VAPID public key loaded: length={}, first_byte=0x{:02x}",
+            diagnostics.length, diagnostics.first_byte
+        );
+        let vapid_config = web_push_sender::VapidConfig {
+            private_key: vapid_keys.private_key,
+            public_key: vapid_keys.public_key,
+            subject: args.vapid_subject.clone(),
+            public_base_url: args.public_base_url.clone(),
+        };
+        push::create_push_router(storage.clone(), true, Some(vapid_config))
     } else {
         info!("Web Push disabled");
         Router::new()

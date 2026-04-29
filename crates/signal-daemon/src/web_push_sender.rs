@@ -1,5 +1,6 @@
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use p256::PublicKey as P256PublicKey;
+use serde::Serialize;
 use sha2::{Digest, Sha256};
 use signal_core::models::PushSubscription;
 use std::time::Duration;
@@ -14,7 +15,7 @@ pub struct VapidConfig {
     pub public_base_url: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct PushDebug {
     pub endpoint_origin: Option<String>,
     pub endpoint_prefix: String,
@@ -30,7 +31,7 @@ pub struct PushDebug {
     pub library_error_body: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct PushResult {
     pub endpoint: String,
     pub success: bool,
@@ -38,7 +39,7 @@ pub struct PushResult {
     pub debug: PushDebug,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct PushSummary {
     pub attempted: usize,
     pub sent: usize,
@@ -159,10 +160,13 @@ pub async fn send_web_push(
     )
     .with_vapid(&vapid_key_pair, &vapid_config.subject);
 
-    let request = builder.build(payload.as_bytes().to_vec())?;
+    let request = builder
+        .build(payload.as_bytes().to_vec())
+        .map_err(|e| e.to_string())?;
 
     let uri = request.uri().to_string();
-    let method = request.method().clone();
+    let method = reqwest::Method::from_bytes(request.method().as_str().as_bytes())
+        .map_err(|e| format!("Invalid push request method: {}", e))?;
 
     let client = reqwest::Client::new();
     let mut req_builder = client
