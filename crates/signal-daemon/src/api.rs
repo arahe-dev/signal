@@ -1,5 +1,6 @@
 use crate::app_state::AppState;
 use crate::html;
+use crate::web_push_sender::{build_message_payload, send_web_push_to_all_active, VapidConfig};
 use axum::{
     body::Bytes,
     extract::{Path, Query, State},
@@ -99,8 +100,16 @@ pub fn create_api_router(
     storage: Arc<Storage>,
     token: Option<String>,
     require_token_for_read: bool,
+    enable_web_push: bool,
+    vapid_config: Option<VapidConfig>,
 ) -> Router {
-    let state = AppState::new(storage, token, require_token_for_read);
+    let state = AppState::with_push(
+        storage,
+        token,
+        require_token_for_read,
+        enable_web_push,
+        vapid_config,
+    );
 
     Router::new()
         .route("/health", get(health))
@@ -165,7 +174,58 @@ async fn create_message(
     })?;
 
     info!("Created message: {} from {}", message.id, message.source);
+    send_message_push_notification(&state, &message).await;
     Ok(Json(message))
+}
+
+async fn send_message_push_notification(state: &AppState, message: &Message) {
+    if !state.enable_web_push {
+        return;
+    }
+
+    let Some(vapid_config) = state.vapid_config.clone() else {
+        tracing::warn!("Skipping message push because VAPID is not configured");
+        return;
+    };
+
+    let subscriptions = match state.storage.list_active_push_subscriptions() {
+        Ok(subscriptions) => subscriptions,
+        Err(e) => {
+            tracing::warn!("Failed to list push subscriptions for message push: {}", e);
+            return;
+        }
+    };
+
+    if subscriptions.is_empty() {
+        return;
+    }
+
+    let payload = build_message_payload(message, vapid_config.public_base_url.as_deref());
+    let summary = send_web_push_to_all_active(&subscriptions, &vapid_config, &payload).await;
+
+    for result in &summary.results {
+        let Some(subscription) = subscriptions
+            .iter()
+            .find(|subscription| subscription.endpoint == result.endpoint)
+        else {
+            continue;
+        };
+
+        if result.success {
+            let _ = state
+                .storage
+                .update_push_subscription_success(&subscription.id);
+        } else if let Some(error) = &result.error {
+            let _ = state
+                .storage
+                .update_push_subscription_error(&subscription.id, error);
+        }
+    }
+
+    info!(
+        "Message push attempted {}, sent {}, failed {} for message {}",
+        summary.attempted, summary.sent, summary.failed, message.id
+    );
 }
 
 async fn list_messages(

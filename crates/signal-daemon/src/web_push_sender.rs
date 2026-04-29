@@ -2,7 +2,7 @@ use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use p256::PublicKey as P256PublicKey;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
-use signal_core::models::PushSubscription;
+use signal_core::models::{Message, PushSubscription};
 use std::time::Duration;
 use tokio::time::timeout;
 use web_push_native::{Auth, WebPushBuilder};
@@ -284,6 +284,32 @@ pub fn build_generic_payload(public_base_url: Option<&str>) -> String {
         "title": "Signal",
         "body": "New Signal message. Tap to open inbox.",
         "url": url
+    })
+    .to_string()
+}
+
+pub fn build_message_payload(message: &Message, public_base_url: Option<&str>) -> String {
+    let base = public_base_url.unwrap_or("");
+    let url = if base.is_empty() {
+        format!("/message/{}", message.id)
+    } else {
+        format!("{}/message/{}", base.trim_end_matches('/'), message.id)
+    };
+
+    let mut context = format!("{}: {}", message.source, message.body);
+    if let Some(project) = &message.project {
+        if !project.is_empty() {
+            context = format!("[{}] {}", project, context);
+        }
+    }
+
+    serde_json::json!({
+        "title": format!("Signal: {}", message.title),
+        "body": context.chars().take(180).collect::<String>(),
+        "url": url,
+        "message_id": message.id,
+        "source": message.source,
+        "project": message.project
     })
     .to_string()
 }

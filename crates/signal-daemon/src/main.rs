@@ -85,18 +85,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let storage = Storage::new(&args.db_path)?;
     let storage = Arc::new(storage);
 
-    let api_router = api::create_api_router(
-        storage.clone(),
-        args.token.clone(),
-        args.require_token_for_read,
-    );
     let html_router = api::create_html_router(
         storage.clone(),
         args.token.clone(),
         args.require_token_for_read,
     );
 
-    let push_router = if args.enable_web_push {
+    let vapid_config = if args.enable_web_push {
         info!("Web Push enabled");
         let vapid_keys = vapid::load_or_generate_vapid_keys(&args.vapid_file)?;
         let diagnostics = vapid::get_diagnostics(&vapid_keys.public_key)?;
@@ -104,15 +99,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "VAPID public key loaded: length={}, first_byte=0x{:02x}",
             diagnostics.length, diagnostics.first_byte
         );
-        let vapid_config = web_push_sender::VapidConfig {
+        Some(web_push_sender::VapidConfig {
             private_key: vapid_keys.private_key,
             public_key: vapid_keys.public_key,
             subject: args.vapid_subject.clone(),
             public_base_url: args.public_base_url.clone(),
-        };
-        push::create_push_router(storage.clone(), true, Some(vapid_config))
+        })
     } else {
         info!("Web Push disabled");
+        None
+    };
+
+    let api_router = api::create_api_router(
+        storage.clone(),
+        args.token.clone(),
+        args.require_token_for_read,
+        args.enable_web_push,
+        vapid_config.clone(),
+    );
+
+    let push_router = if args.enable_web_push {
+        push::create_push_router(storage.clone(), true, vapid_config)
+    } else {
         Router::new()
     };
 
