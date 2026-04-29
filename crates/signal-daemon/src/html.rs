@@ -130,15 +130,21 @@ pub fn render_inbox(messages: &[Message], token: Option<&str>) -> String {
         for msg in messages {
             let status_class = match msg.status {
                 MessageStatus::New => "status-new",
-                MessageStatus::Pending => "status-pending",
+                MessageStatus::PendingReply => "status-pending",
+                MessageStatus::Replied => "status-replied",
+                MessageStatus::Timeout => "status-timeout",
                 MessageStatus::Consumed => "status-consumed",
                 MessageStatus::Archived => "status-archived",
+                MessageStatus::Failed => "status-failed",
             };
             let status_label = match msg.status {
                 MessageStatus::New => "New",
-                MessageStatus::Pending => "Pending",
+                MessageStatus::PendingReply => "Pending Reply",
+                MessageStatus::Replied => "Replied",
+                MessageStatus::Timeout => "Timeout",
                 MessageStatus::Consumed => "Consumed",
                 MessageStatus::Archived => "Archived",
+                MessageStatus::Failed => "Failed",
             };
             let body_escaped = msg
                 .body
@@ -207,15 +213,46 @@ pub fn render_message_detail(message: &Message, replies: &[Reply], token: Option
         .unwrap_or_default();
     let status_class = match message.status {
         MessageStatus::New => "status-new",
-        MessageStatus::Pending => "status-pending",
+        MessageStatus::PendingReply => "status-pending",
+        MessageStatus::Replied => "status-replied",
+        MessageStatus::Timeout => "status-timeout",
         MessageStatus::Consumed => "status-consumed",
         MessageStatus::Archived => "status-archived",
+        MessageStatus::Failed => "status-failed",
     };
     let status_label = match message.status {
         MessageStatus::New => "New",
-        MessageStatus::Pending => "Pending",
+        MessageStatus::PendingReply => "Pending Reply",
+        MessageStatus::Replied => "Replied",
+        MessageStatus::Timeout => "Timeout",
         MessageStatus::Consumed => "Consumed",
         MessageStatus::Archived => "Archived",
+        MessageStatus::Failed => "Failed",
+    };
+    let reply_options: Vec<String> = message
+        .reply_options_json
+        .as_deref()
+        .and_then(|json| serde_json::from_str(json).ok())
+        .unwrap_or_default();
+    let quick_reply_html = if reply_options.is_empty() {
+        String::new()
+    } else {
+        let buttons = reply_options
+            .iter()
+            .map(|option| {
+                let escaped = option
+                    .replace('&', "&amp;")
+                    .replace('<', "&lt;")
+                    .replace('>', "&gt;")
+                    .replace('"', "&quot;");
+                format!(
+                    r#"<button class="quick-reply" type="button" onclick="document.getElementById('body').value='{}'">{}</button>"#,
+                    escaped, escaped
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("");
+        format!(r#"<div class="quick-replies">{}</div>"#, buttons)
     };
 
     html.push_str(&format!(r#"<!DOCTYPE html>
@@ -289,8 +326,11 @@ pub fn render_message_detail(message: &Message, replies: &[Reply], token: Option
         }}
         .status-new {{ background: #e3f2fd; color: #1976d2; }}
         .status-pending {{ background: #fff3e0; color: #f57c00; }}
+        .status-replied {{ background: #e8f5e9; color: #388e3c; }}
+        .status-timeout {{ background: #ffebee; color: #d32f2f; }}
         .status-consumed {{ background: #e8f5e9; color: #388e3c; }}
         .status-archived {{ background: #f5f5f5; color: #757575; }}
+        .status-failed {{ background: #ffebee; color: #d32f2f; }}
         .replies-section {{
             margin-bottom: 20px;
         }}
@@ -366,6 +406,20 @@ pub fn render_message_detail(message: &Message, replies: &[Reply], token: Option
         .form-submit:hover {{
             background: #0056b3;
         }}
+        .quick-replies {{
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+            margin-bottom: 12px;
+        }}
+        .quick-reply {{
+            border: 1px solid #007aff;
+            color: #007aff;
+            background: #fff;
+            border-radius: 999px;
+            padding: 8px 12px;
+            font: inherit;
+        }}
         .no-replies {{
             color: #86868b;
             font-size: 14px;
@@ -435,6 +489,7 @@ pub fn render_message_detail(message: &Message, replies: &[Reply], token: Option
                 {}
                 <div class="form-group">
                     <label class="form-label" for="body">Your reply</label>
+                    {}
                     <textarea class="form-textarea" id="body" name="body" required placeholder="Type your reply here..."></textarea>
                 </div>
                 <button type="submit" class="form-submit">Send Reply</button>
@@ -442,7 +497,7 @@ pub fn render_message_detail(message: &Message, replies: &[Reply], token: Option
         </div>
     </div>
 </body>
-</html>"#, message.id, token_field));
+</html>"#, message.id, token_field, quick_reply_html));
 
     html
 }

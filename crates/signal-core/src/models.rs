@@ -6,9 +6,12 @@ use uuid::Uuid;
 #[serde(rename_all = "lowercase")]
 pub enum MessageStatus {
     New,
-    Pending,
+    PendingReply,
+    Replied,
+    Timeout,
     Consumed,
     Archived,
+    Failed,
 }
 
 impl Default for MessageStatus {
@@ -21,9 +24,12 @@ impl std::fmt::Display for MessageStatus {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             MessageStatus::New => write!(f, "new"),
-            MessageStatus::Pending => write!(f, "pending"),
+            MessageStatus::PendingReply => write!(f, "pending_reply"),
+            MessageStatus::Replied => write!(f, "replied"),
+            MessageStatus::Timeout => write!(f, "timeout"),
             MessageStatus::Consumed => write!(f, "consumed"),
             MessageStatus::Archived => write!(f, "archived"),
+            MessageStatus::Failed => write!(f, "failed"),
         }
     }
 }
@@ -33,9 +39,12 @@ impl std::str::FromStr for MessageStatus {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
             "new" => Ok(MessageStatus::New),
-            "pending" => Ok(MessageStatus::Pending),
+            "pending" | "pending_reply" => Ok(MessageStatus::PendingReply),
+            "replied" => Ok(MessageStatus::Replied),
+            "timeout" => Ok(MessageStatus::Timeout),
             "consumed" => Ok(MessageStatus::Consumed),
             "archived" => Ok(MessageStatus::Archived),
+            "failed" => Ok(MessageStatus::Failed),
             _ => Err(format!("Unknown status: {}", s)),
         }
     }
@@ -82,6 +91,7 @@ impl std::str::FromStr for PermissionLevel {
 pub enum ReplyStatus {
     Pending,
     Consumed,
+    Expired,
     Archived,
 }
 
@@ -96,6 +106,7 @@ impl std::fmt::Display for ReplyStatus {
         match self {
             ReplyStatus::Pending => write!(f, "pending"),
             ReplyStatus::Consumed => write!(f, "consumed"),
+            ReplyStatus::Expired => write!(f, "expired"),
             ReplyStatus::Archived => write!(f, "archived"),
         }
     }
@@ -107,6 +118,7 @@ impl std::str::FromStr for ReplyStatus {
         match s.to_lowercase().as_str() {
             "pending" => Ok(ReplyStatus::Pending),
             "consumed" => Ok(ReplyStatus::Consumed),
+            "expired" => Ok(ReplyStatus::Expired),
             "archived" => Ok(ReplyStatus::Archived),
             _ => Err(format!("Unknown reply status: {}", s)),
         }
@@ -125,6 +137,10 @@ pub struct Message {
     pub project: Option<String>,
     pub status: MessageStatus,
     pub permission_level: PermissionLevel,
+    pub expires_at: Option<DateTime<Utc>>,
+    pub priority: Option<String>,
+    pub reply_mode: Option<String>,
+    pub reply_options_json: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -153,6 +169,10 @@ impl Message {
             project,
             status: MessageStatus::New,
             permission_level,
+            expires_at: None,
+            priority: None,
+            reply_mode: None,
+            reply_options_json: None,
             created_at: now,
             updated_at: now,
         }
@@ -168,6 +188,7 @@ pub struct Reply {
     pub source_device: Option<String>,
     pub status: ReplyStatus,
     pub created_at: DateTime<Utc>,
+    pub consumed_at: Option<DateTime<Utc>>,
 }
 
 impl Reply {
@@ -187,6 +208,7 @@ impl Reply {
             source_device,
             status: ReplyStatus::Pending,
             created_at: now,
+            consumed_at: None,
         }
     }
 }
@@ -322,6 +344,19 @@ pub struct PushSubscription {
     pub last_error: Option<String>,
     pub status: String,
     pub vapid_public_key_hash: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AskRequest {
+    pub agent_id: Option<String>,
+    pub project: Option<String>,
+    pub title: String,
+    pub body: String,
+    pub timeout_seconds: Option<u64>,
+    pub priority: Option<String>,
+    pub reply_mode: Option<String>,
+    pub reply_options: Option<Vec<String>>,
+    pub source: String,
 }
 
 impl PushSubscription {

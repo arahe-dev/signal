@@ -293,17 +293,7 @@ pub fn build_message_payload(
     public_base_url: Option<&str>,
     token: Option<&str>,
 ) -> String {
-    let base = public_base_url.unwrap_or("");
-    let mut url = if base.is_empty() {
-        format!("/message/{}", message.id)
-    } else {
-        format!("{}/message/{}", base.trim_end_matches('/'), message.id)
-    };
-    if let Some(token) = token {
-        if !token.is_empty() {
-            url = format!("{}?token={}", url, token);
-        }
-    }
+    let url = build_message_url(&message.id, public_base_url, token);
 
     let mut context = format!("{}: {}", message.source, message.body);
     if let Some(project) = &message.project {
@@ -316,6 +306,102 @@ pub fn build_message_payload(
         "title": format!("Signal: {}", message.title),
         "body": context.chars().take(180).collect::<String>(),
         "url": url,
+        "message_id": message.id,
+        "source": message.source,
+        "project": message.project
+    })
+    .to_string()
+}
+
+pub fn build_message_url(
+    message_id: &str,
+    public_base_url: Option<&str>,
+    token: Option<&str>,
+) -> String {
+    let base = public_base_url.unwrap_or("");
+    let mut url = if base.is_empty() {
+        format!("/message/{}", message_id)
+    } else {
+        format!("{}/message/{}", base.trim_end_matches('/'), message_id)
+    };
+    if let Some(token) = token {
+        if !token.is_empty() {
+            url = format!("{}?token={}", url, token);
+        }
+    }
+    url
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{build_ask_payload, build_message_payload, build_message_url};
+    use signal_core::models::{Message, PermissionLevel};
+
+    fn message() -> Message {
+        let mut message = Message::new(
+            "Need input".to_string(),
+            "Reply yes".to_string(),
+            "codex".to_string(),
+            None,
+            Some("codex".to_string()),
+            Some("signal".to_string()),
+            PermissionLevel::Actionable,
+        );
+        message.id = "message-123".to_string();
+        message
+    }
+
+    #[test]
+    fn message_url_generation_includes_message_and_token() {
+        assert_eq!(
+            build_message_url(
+                "message-123",
+                Some("https://example.test"),
+                Some("dev-token")
+            ),
+            "https://example.test/message/message-123?token=dev-token"
+        );
+    }
+
+    #[test]
+    fn notification_payload_url_points_to_message_detail() {
+        let payload: serde_json::Value = serde_json::from_str(&build_message_payload(
+            &message(),
+            Some("https://example.test"),
+            Some("dev-token"),
+        ))
+        .unwrap();
+        assert_eq!(
+            payload["url"],
+            "https://example.test/message/message-123?token=dev-token"
+        );
+    }
+
+    #[test]
+    fn ask_notification_payload_uses_generic_body_and_deep_link() {
+        let payload: serde_json::Value = serde_json::from_str(&build_ask_payload(
+            &message(),
+            Some("https://example.test"),
+            Some("dev-token"),
+        ))
+        .unwrap();
+        assert_eq!(payload["title"], "Signal");
+        assert_eq!(
+            payload["url"],
+            "https://example.test/message/message-123?token=dev-token"
+        );
+    }
+}
+
+pub fn build_ask_payload(
+    message: &Message,
+    public_base_url: Option<&str>,
+    token: Option<&str>,
+) -> String {
+    serde_json::json!({
+        "title": "Signal",
+        "body": format!("Reply requested from {}. Tap to open.", message.agent_id.as_deref().unwrap_or(&message.source)),
+        "url": build_message_url(&message.id, public_base_url, token),
         "message_id": message.id,
         "source": message.source,
         "project": message.project

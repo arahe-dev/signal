@@ -48,6 +48,10 @@ mod tests {
             project: None,
             status: crate::models::MessageStatus::New,
             permission_level: permission,
+            expires_at: None,
+            priority: None,
+            reply_mode: None,
+            reply_options_json: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }

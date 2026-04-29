@@ -58,6 +58,10 @@ impl Storage {
                 project TEXT,
                 status TEXT NOT NULL DEFAULT 'new',
                 permission_level TEXT NOT NULL DEFAULT 'private',
+                expires_at TEXT,
+                priority TEXT,
+                reply_mode TEXT,
+                reply_options_json TEXT,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             )",
@@ -73,6 +77,7 @@ impl Storage {
                 source_device TEXT,
                 status TEXT NOT NULL DEFAULT 'pending',
                 created_at TEXT NOT NULL,
+                consumed_at TEXT,
                 FOREIGN KEY (message_id) REFERENCES messages(id)
             )",
             [],
@@ -109,6 +114,15 @@ impl Storage {
             "ALTER TABLE push_subscriptions ADD COLUMN vapid_public_key_hash TEXT",
             [],
         );
+        for migration in [
+            "ALTER TABLE messages ADD COLUMN expires_at TEXT",
+            "ALTER TABLE messages ADD COLUMN priority TEXT",
+            "ALTER TABLE messages ADD COLUMN reply_mode TEXT",
+            "ALTER TABLE messages ADD COLUMN reply_options_json TEXT",
+            "ALTER TABLE replies ADD COLUMN consumed_at TEXT",
+        ] {
+            let _ = conn.execute(migration, []);
+        }
 
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_push_subscriptions_endpoint ON push_subscriptions(endpoint)",
@@ -143,8 +157,8 @@ impl Storage {
     pub fn create_message(&self, message: &Message) -> Result<(), StorageError> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "INSERT INTO messages (id, thread_id, title, body, source, source_device, agent_id, project, status, permission_level, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            "INSERT INTO messages (id, thread_id, title, body, source, source_device, agent_id, project, status, permission_level, expires_at, priority, reply_mode, reply_options_json, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
             params![
                 message.id,
                 message.thread_id,
@@ -156,6 +170,10 @@ impl Storage {
                 message.project,
                 message.status.to_string(),
                 message.permission_level.to_string(),
+                message.expires_at.map(|dt| dt.to_rfc3339()),
+                message.priority,
+                message.reply_mode,
+                message.reply_options_json,
                 message.created_at.to_rfc3339(),
                 message.updated_at.to_rfc3339(),
             ],
@@ -167,7 +185,7 @@ impl Storage {
     pub fn get_message(&self, id: &str) -> Result<Message, StorageError> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, thread_id, title, body, source, source_device, agent_id, project, status, permission_level, created_at, updated_at
+            "SELECT id, thread_id, title, body, source, source_device, agent_id, project, status, permission_level, expires_at, priority, reply_mode, reply_options_json, created_at, updated_at
              FROM messages WHERE id = ?1",
         )?;
 
@@ -186,10 +204,18 @@ impl Storage {
                     project: row.get(7)?,
                     status: status_str.parse().unwrap_or_default(),
                     permission_level: perm_str.parse().unwrap_or_default(),
-                    created_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(10)?)
+                    expires_at: row.get::<_, Option<String>>(10)?.and_then(|s| {
+                        chrono::DateTime::parse_from_rfc3339(&s)
+                            .map(|dt| dt.with_timezone(&chrono::Utc))
+                            .ok()
+                    }),
+                    priority: row.get(11)?,
+                    reply_mode: row.get(12)?,
+                    reply_options_json: row.get(13)?,
+                    created_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(14)?)
                         .map(|dt| dt.with_timezone(&chrono::Utc))
                         .unwrap_or_else(|_| chrono::Utc::now()),
-                    updated_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(11)?)
+                    updated_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(15)?)
                         .map(|dt| dt.with_timezone(&chrono::Utc))
                         .unwrap_or_else(|_| chrono::Utc::now()),
                 })
@@ -209,7 +235,7 @@ impl Storage {
         let conn = self.conn.lock().unwrap();
 
         let mut sql = String::from(
-            "SELECT id, thread_id, title, body, source, source_device, agent_id, project, status, permission_level, created_at, updated_at
+            "SELECT id, thread_id, title, body, source, source_device, agent_id, project, status, permission_level, expires_at, priority, reply_mode, reply_options_json, created_at, updated_at
              FROM messages WHERE 1=1"
         );
         let mut params: Vec<rusqlite::types::Value> = Vec::new();
@@ -249,10 +275,18 @@ impl Storage {
                 project: row.get(7)?,
                 status: status_str.parse().unwrap_or_default(),
                 permission_level: perm_str.parse().unwrap_or_default(),
-                created_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(10)?)
+                expires_at: row.get::<_, Option<String>>(10)?.and_then(|s| {
+                    chrono::DateTime::parse_from_rfc3339(&s)
+                        .map(|dt| dt.with_timezone(&chrono::Utc))
+                        .ok()
+                }),
+                priority: row.get(11)?,
+                reply_mode: row.get(12)?,
+                reply_options_json: row.get(13)?,
+                created_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(14)?)
                     .map(|dt| dt.with_timezone(&chrono::Utc))
                     .unwrap_or_else(|_| chrono::Utc::now()),
-                updated_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(11)?)
+                updated_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(15)?)
                     .map(|dt| dt.with_timezone(&chrono::Utc))
                     .unwrap_or_else(|_| chrono::Utc::now()),
             })
@@ -283,8 +317,8 @@ impl Storage {
     pub fn create_reply(&self, reply: &Reply) -> Result<(), StorageError> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "INSERT INTO replies (id, message_id, body, source, source_device, status, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            "INSERT INTO replies (id, message_id, body, source, source_device, status, created_at, consumed_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 reply.id,
                 reply.message_id,
@@ -293,6 +327,7 @@ impl Storage {
                 reply.source_device,
                 reply.status.to_string(),
                 reply.created_at.to_rfc3339(),
+                reply.consumed_at.map(|dt| dt.to_rfc3339()),
             ],
         )?;
         info!(
@@ -305,7 +340,7 @@ impl Storage {
     pub fn get_replies_for_message(&self, message_id: &str) -> Result<Vec<Reply>, StorageError> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, message_id, body, source, source_device, status, created_at
+            "SELECT id, message_id, body, source, source_device, status, created_at, consumed_at
              FROM replies WHERE message_id = ?1 ORDER BY created_at ASC",
         )?;
 
@@ -321,6 +356,11 @@ impl Storage {
                 created_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(6)?)
                     .map(|dt| dt.with_timezone(&chrono::Utc))
                     .unwrap_or_else(|_| chrono::Utc::now()),
+                consumed_at: row.get::<_, Option<String>>(7)?.and_then(|s| {
+                    chrono::DateTime::parse_from_rfc3339(&s)
+                        .map(|dt| dt.with_timezone(&chrono::Utc))
+                        .ok()
+                }),
             })
         })?;
 
@@ -334,7 +374,7 @@ impl Storage {
     pub fn get_reply(&self, id: &str) -> Result<Reply, StorageError> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, message_id, body, source, source_device, status, created_at
+            "SELECT id, message_id, body, source, source_device, status, created_at, consumed_at
              FROM replies WHERE id = ?1",
         )?;
 
@@ -350,6 +390,11 @@ impl Storage {
                 created_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(6)?)
                     .map(|dt| dt.with_timezone(&chrono::Utc))
                     .unwrap_or_else(|_| chrono::Utc::now()),
+                consumed_at: row.get::<_, Option<String>>(7)?.and_then(|s| {
+                    chrono::DateTime::parse_from_rfc3339(&s)
+                        .map(|dt| dt.with_timezone(&chrono::Utc))
+                        .ok()
+                }),
             })
         })
         .map_err(|_| StorageError::NotFound(format!("Reply not found: {}", id)))
@@ -363,7 +408,7 @@ impl Storage {
         let conn = self.conn.lock().unwrap();
 
         let mut sql = String::from(
-            "SELECT r.id, r.message_id, r.body, r.source, r.source_device, r.status, r.created_at
+            "SELECT r.id, r.message_id, r.body, r.source, r.source_device, r.status, r.created_at, r.consumed_at
              FROM replies r
              JOIN messages m ON r.message_id = m.id
              WHERE r.status = 'pending'",
@@ -395,6 +440,11 @@ impl Storage {
                 created_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(6)?)
                     .map(|dt| dt.with_timezone(&chrono::Utc))
                     .unwrap_or_else(|_| chrono::Utc::now()),
+                consumed_at: row.get::<_, Option<String>>(7)?.and_then(|s| {
+                    chrono::DateTime::parse_from_rfc3339(&s)
+                        .map(|dt| dt.with_timezone(&chrono::Utc))
+                        .ok()
+                }),
             })
         });
 
@@ -407,9 +457,14 @@ impl Storage {
 
     pub fn update_reply_status(&self, id: &str, status: ReplyStatus) -> Result<(), StorageError> {
         let conn = self.conn.lock().unwrap();
+        let consumed_at = if status == ReplyStatus::Consumed {
+            Some(chrono::Utc::now().to_rfc3339())
+        } else {
+            None
+        };
         conn.execute(
-            "UPDATE replies SET status = ?1 WHERE id = ?2",
-            params![status.to_string(), id],
+            "UPDATE replies SET status = ?1, consumed_at = COALESCE(?2, consumed_at) WHERE id = ?3",
+            params![status.to_string(), consumed_at, id],
         )?;
         info!("Updated reply {} status to {}", id, status);
         Ok(())
@@ -626,7 +681,12 @@ mod tests {
     #[test]
     fn list_messages_with_default_limit_returns_message() {
         let storage = make_storage();
-        let message = make_message("one", MessageStatus::Pending, Some("ivy"), Some("codex"));
+        let message = make_message(
+            "one",
+            MessageStatus::PendingReply,
+            Some("ivy"),
+            Some("codex"),
+        );
         storage.create_message(&message).unwrap();
 
         let messages = storage.list_messages(None, None, None, None).unwrap();
@@ -639,7 +699,7 @@ mod tests {
         for i in 0..3 {
             let message = make_message(
                 &format!("m{i}"),
-                MessageStatus::Pending,
+                MessageStatus::PendingReply,
                 Some("ivy"),
                 Some("codex"),
             );
@@ -653,18 +713,23 @@ mod tests {
     #[test]
     fn list_messages_with_filters_works() {
         let storage = make_storage();
-        let keep = make_message("keep", MessageStatus::Pending, Some("ivy"), Some("codex"));
+        let keep = make_message(
+            "keep",
+            MessageStatus::PendingReply,
+            Some("ivy"),
+            Some("codex"),
+        );
         let other_status =
             make_message("other", MessageStatus::Consumed, Some("ivy"), Some("codex"));
         let other_project = make_message(
             "other2",
-            MessageStatus::Pending,
+            MessageStatus::PendingReply,
             Some("moon"),
             Some("codex"),
         );
         let other_agent = make_message(
             "other3",
-            MessageStatus::Pending,
+            MessageStatus::PendingReply,
             Some("ivy"),
             Some("other-agent"),
         );
@@ -675,7 +740,7 @@ mod tests {
 
         assert_eq!(
             storage
-                .list_messages(None, Some(MessageStatus::Pending), None, None)
+                .list_messages(None, Some(MessageStatus::PendingReply), None, None)
                 .unwrap()
                 .len(),
             3
@@ -698,7 +763,7 @@ mod tests {
             storage
                 .list_messages(
                     None,
-                    Some(MessageStatus::Pending),
+                    Some(MessageStatus::PendingReply),
                     Some("ivy"),
                     Some("codex")
                 )
@@ -713,7 +778,7 @@ mod tests {
         let storage = make_storage();
         let message = make_message(
             "reply-target",
-            MessageStatus::Pending,
+            MessageStatus::PendingReply,
             Some("ivy"),
             Some("codex"),
         );
@@ -730,5 +795,56 @@ mod tests {
             .get_latest_pending_reply(Some("codex"), Some("ivy"))
             .unwrap();
         assert!(latest.is_some());
+    }
+
+    #[test]
+    fn ask_message_creation_sets_pending_reply() {
+        let storage = make_storage();
+        let mut message = make_message(
+            "ask",
+            MessageStatus::PendingReply,
+            Some("signal"),
+            Some("codex"),
+        );
+        message.expires_at = Some(chrono::Utc::now() + chrono::Duration::minutes(10));
+        message.priority = Some("normal".to_string());
+        message.reply_mode = Some("text".to_string());
+        message.reply_options_json = Some("[\"yes\",\"no\"]".to_string());
+
+        storage.create_message(&message).unwrap();
+        let stored = storage.get_message(&message.id).unwrap();
+
+        assert_eq!(stored.status, MessageStatus::PendingReply);
+        assert!(stored.expires_at.is_some());
+        assert_eq!(stored.priority.as_deref(), Some("normal"));
+        assert_eq!(stored.reply_mode.as_deref(), Some("text"));
+    }
+
+    #[test]
+    fn reply_and_consume_state_updates_work() {
+        let storage = make_storage();
+        let message = make_message("ask", MessageStatus::PendingReply, None, Some("codex"));
+        storage.create_message(&message).unwrap();
+        let reply = Reply::new(
+            message.id.clone(),
+            "yes".to_string(),
+            "phone".to_string(),
+            None,
+        );
+        storage.create_reply(&reply).unwrap();
+        storage
+            .update_message_status(&message.id, MessageStatus::Replied)
+            .unwrap();
+        storage
+            .update_reply_status(&reply.id, ReplyStatus::Consumed)
+            .unwrap();
+
+        assert_eq!(
+            storage.get_message(&message.id).unwrap().status,
+            MessageStatus::Replied
+        );
+        let consumed = storage.get_reply(&reply.id).unwrap();
+        assert_eq!(consumed.status, ReplyStatus::Consumed);
+        assert!(consumed.consumed_at.is_some());
     }
 }
