@@ -162,10 +162,8 @@
                     throw new Error('VAPID public key is not configured');
                 }
 
-                const subscription = await registration.pushManager.subscribe({
-                    userVisibleOnly: true,
-                    applicationServerKey: urlBase64ToUint8Array(keyResult.public_key)
-                });
+                const applicationServerKey = urlBase64ToUint8Array(keyResult.public_key);
+                const subscription = await subscribeWithCurrentVapidKey(registration, applicationServerKey);
 
                 console.log('Push subscription:', subscription);
                 const subscriptionJson = subscription.toJSON();
@@ -198,6 +196,36 @@
             } catch (error) {
                 console.error('Push subscription error:', error);
                 showStatus('Error: ' + error.message, 'error');
+            }
+        }
+
+        async function subscribeWithCurrentVapidKey(registration, applicationServerKey) {
+            const existingSubscription = await registration.pushManager.getSubscription();
+            if (existingSubscription) {
+                console.log('Removing existing push subscription before subscribing with current VAPID key');
+                await existingSubscription.unsubscribe();
+            }
+
+            try {
+                return await registration.pushManager.subscribe({
+                    userVisibleOnly: true,
+                    applicationServerKey
+                });
+            } catch (error) {
+                if (!String(error.message || error).toLowerCase().includes('applicationserverkey')) {
+                    throw error;
+                }
+
+                const staleSubscription = await registration.pushManager.getSubscription();
+                if (staleSubscription) {
+                    console.log('Retrying after removing stale push subscription with mismatched VAPID key');
+                    await staleSubscription.unsubscribe();
+                }
+
+                return await registration.pushManager.subscribe({
+                    userVisibleOnly: true,
+                    applicationServerKey
+                });
             }
         }
 
