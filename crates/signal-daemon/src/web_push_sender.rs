@@ -288,13 +288,22 @@ pub fn build_generic_payload(public_base_url: Option<&str>) -> String {
     .to_string()
 }
 
-pub fn build_message_payload(message: &Message, public_base_url: Option<&str>) -> String {
+pub fn build_message_payload(
+    message: &Message,
+    public_base_url: Option<&str>,
+    token: Option<&str>,
+) -> String {
     let base = public_base_url.unwrap_or("");
-    let url = if base.is_empty() {
+    let mut url = if base.is_empty() {
         format!("/message/{}", message.id)
     } else {
         format!("{}/message/{}", base.trim_end_matches('/'), message.id)
     };
+    if let Some(token) = token {
+        if !token.is_empty() {
+            url = format!("{}?token={}", url, token);
+        }
+    }
 
     let mut context = format!("{}: {}", message.source, message.body);
     if let Some(project) = &message.project {

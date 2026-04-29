@@ -200,7 +200,11 @@ async fn send_message_push_notification(state: &AppState, message: &Message) {
         return;
     }
 
-    let payload = build_message_payload(message, vapid_config.public_base_url.as_deref());
+    let payload = build_message_payload(
+        message,
+        vapid_config.public_base_url.as_deref(),
+        state.token.as_deref(),
+    );
     let summary = send_web_push_to_all_active(&subscriptions, &vapid_config, &payload).await;
 
     for result in &summary.results {
