@@ -1,0 +1,1 @@
+fn(State<AppState>) -> impl Future<Output = Html<std::string::String>> {inbox_page}: Handler<_, _>

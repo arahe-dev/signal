@@ -1,0 +1,2 @@
+fn(State<AppState>, axum::extract::Path<std::string::String>, Form<ReplyFormData>) -> impl Future<Output = Result<impl IntoResponse, Response<Body>>> {reply_form_handler}
+fn(State<AppState>, axum::extract::Path<std::string::String>, Form<ReplyFormData>) -> impl Future<Output = Result<impl IntoResponse, Response<Body>>> {reply_form_handler}: Handler<_, _>

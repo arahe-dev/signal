@@ -1,0 +1,2 @@
+fn(State<AppState>, axum::extract::Path<std::string::String>) -> impl Future<Output = Result<axum::Json<signal_core::MessageWithReplies>, Response<Body>>> {get_message}
+fn(State<AppState>, axum::extract::Path<std::string::String>) -> impl Future<Output = Result<axum::Json<signal_core::MessageWithReplies>, Response<Body>>> {get_message}: Handler<_, _>

@@ -1,0 +1,1 @@
+C:\signal_ping\target\release\libsignal_core.rlib: C:\signal_ping\crates\signal-core\src\events.rs C:\signal_ping\crates\signal-core\src\lib.rs C:\signal_ping\crates\signal-core\src\models.rs C:\signal_ping\crates\signal-core\src\permissions.rs C:\signal_ping\crates\signal-core\src\storage.rs

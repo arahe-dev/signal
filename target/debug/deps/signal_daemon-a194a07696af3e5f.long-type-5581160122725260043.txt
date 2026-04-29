@@ -1,0 +1,2 @@
+fn(State<AppState>, Query<ListRepliesQuery>) -> impl Future<Output = Result<axum::Json<std::option::Option<signal_core::Reply>>, Response<Body>>> {get_latest_reply}
+fn(State<AppState>, Query<ListRepliesQuery>) -> impl Future<Output = Result<axum::Json<std::option::Option<signal_core::Reply>>, Response<Body>>> {get_latest_reply}: Handler<_, _>
