@@ -1,2 +1,0 @@
-fn(State<AppState>, axum::extract::Path<std::string::String>) -> impl Future<Output = Result<Html<std::string::String>, Response<Body>>> {message_detail_page}
-fn(State<AppState>, axum::extract::Path<std::string::String>) -> impl Future<Output = Result<Html<std::string::String>, Response<Body>>> {message_detail_page}: Handler<_, _>

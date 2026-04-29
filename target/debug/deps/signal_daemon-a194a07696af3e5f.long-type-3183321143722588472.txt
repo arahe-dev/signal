@@ -1,2 +1,0 @@
-fn(State<AppState>, axum::Json<signal_core::CreateMessageRequest>) -> impl Future<Output = Result<axum::Json<signal_core::Message>, Response<Body>>> {create_message}
-fn(State<AppState>, axum::Json<signal_core::CreateMessageRequest>) -> impl Future<Output = Result<axum::Json<signal_core::Message>, Response<Body>>> {create_message}: Handler<_, _>

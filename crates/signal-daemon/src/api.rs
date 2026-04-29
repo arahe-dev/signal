@@ -3,7 +3,7 @@ use crate::html;
 use axum::{
     body::Bytes,
     extract::{Path, Query, State},
-    http::HeaderMap,
+    http::{HeaderMap, Response},
     response::{Html, IntoResponse, Json},
     routing::{get, post},
     Router,
@@ -512,6 +512,12 @@ pub fn create_pwa_router() -> Router {
         .route("/app", get(pwa_app))
         .route("/manifest.webmanifest", get(pwa_manifest))
         .route("/service-worker.js", get(pwa_service_worker))
+        .route("/apple-touch-icon.png", get(pwa_apple_touch_icon))
+        .route(
+            "/apple-touch-icon-precomposed.png",
+            get(pwa_apple_touch_icon),
+        )
+        .route("/apple-touch-icon-180x180.png", get(pwa_apple_touch_icon))
         .route("/icon-192.png", get(pwa_icon_192))
         .route("/icon-512.png", get(pwa_icon_512))
 }
@@ -521,19 +527,26 @@ async fn pwa_app() -> Html<String> {
 }
 
 async fn pwa_manifest() -> impl IntoResponse {
-    axum::response::Json(serde_json::json!({
-        "name": "Signal",
-        "short_name": "Signal",
-        "description": "Local-first human-agent handoff inbox",
-        "start_url": "/app?source=pwa",
-        "display": "standalone",
-        "background_color": "#f5f5f7",
-        "theme_color": "#007aff",
-        "icons": [
-            {"src": "/icon-192.png", "sizes": "192x192", "type": "image/png"},
-            {"src": "/icon-512.png", "sizes": "512x512", "type": "image/png"}
-        ]
-    }))
+    Response::builder()
+        .header("Content-Type", "application/manifest+json")
+        .body(
+            serde_json::json!({
+                "name": "Signal",
+                "short_name": "Signal",
+                "description": "Local-first human-agent handoff inbox",
+                "start_url": "/app?token=dev-token",
+                "scope": "/",
+                "display": "standalone",
+                "background_color": "#f5f5f7",
+                "theme_color": "#f5f5f7",
+                "icons": [
+                    {"src": "/icon-192.png", "sizes": "192x192", "type": "image/png"},
+                    {"src": "/icon-512.png", "sizes": "512x512", "type": "image/png"}
+                ]
+            })
+            .to_string(),
+        )
+        .unwrap()
 }
 
 async fn pwa_service_worker() -> impl IntoResponse {
@@ -543,16 +556,35 @@ async fn pwa_service_worker() -> impl IntoResponse {
         .unwrap()
 }
 
-async fn pwa_icon_192() -> impl IntoResponse {
+async fn pwa_apple_touch_icon() -> impl IntoResponse {
+    let bytes = Bytes::from_static(include_bytes!("apple-touch-icon.png"));
     (
-        [("Content-Type", "image/png")],
-        Bytes::new(),
+        [
+            ("Content-Type", "image/png"),
+            ("Cache-Control", "no-cache, no-store, must-revalidate"),
+        ],
+        bytes,
+    )
+}
+
+async fn pwa_icon_192() -> impl IntoResponse {
+    let bytes = Bytes::from_static(include_bytes!("icon-192.png"));
+    (
+        [
+            ("Content-Type", "image/png"),
+            ("Cache-Control", "public, max-age=3600"),
+        ],
+        bytes,
     )
 }
 
 async fn pwa_icon_512() -> impl IntoResponse {
+    let bytes = Bytes::from_static(include_bytes!("icon-512.png"));
     (
-        [("Content-Type", "image/png")],
-        Bytes::new(),
+        [
+            ("Content-Type", "image/png"),
+            ("Cache-Control", "public, max-age=3600"),
+        ],
+        bytes,
     )
 }

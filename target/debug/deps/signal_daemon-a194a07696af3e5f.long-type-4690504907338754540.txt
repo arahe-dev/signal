@@ -1,2 +1,0 @@
-fn(State<AppState>, Query<ListMessagesQuery>) -> impl Future<Output = Result<axum::Json<Vec<signal_core::Message>>, Response<Body>>> {list_messages}
-fn(State<AppState>, Query<ListMessagesQuery>) -> impl Future<Output = Result<axum::Json<Vec<signal_core::Message>>, Response<Body>>> {list_messages}: Handler<_, _>

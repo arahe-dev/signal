@@ -1,4 +1,6 @@
-use crate::models::{Event, Message, MessageStatus, OutboxEntry, PushSubscription, Reply, ReplyStatus};
+use crate::models::{
+    Event, Message, MessageStatus, OutboxEntry, PushSubscription, Reply, ReplyStatus,
+};
 use rusqlite::{params, Connection};
 use std::path::Path;
 use std::sync::Mutex;
@@ -97,10 +99,16 @@ impl Storage {
                 created_at TEXT NOT NULL,
                 last_success_at TEXT,
                 last_error TEXT,
-                status TEXT NOT NULL DEFAULT 'active'
+                status TEXT NOT NULL DEFAULT 'active',
+                vapid_public_key_hash TEXT
             )",
             [],
         )?;
+
+        let _ = conn.execute(
+            "ALTER TABLE push_subscriptions ADD COLUMN vapid_public_key_hash TEXT",
+            [],
+        );
 
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_push_subscriptions_endpoint ON push_subscriptions(endpoint)",
@@ -495,15 +503,19 @@ impl Storage {
         Ok(entries)
     }
 
-    pub fn upsert_push_subscription(&self, subscription: &PushSubscription) -> Result<(), StorageError> {
+    pub fn upsert_push_subscription(
+        &self,
+        subscription: &PushSubscription,
+    ) -> Result<(), StorageError> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "INSERT INTO push_subscriptions (id, endpoint, p256dh, auth, user_agent, created_at, status)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            "INSERT INTO push_subscriptions (id, endpoint, p256dh, auth, user_agent, created_at, status, vapid_public_key_hash)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
              ON CONFLICT(id) DO UPDATE SET
                 p256dh = excluded.p256dh,
                 auth = excluded.auth,
                 user_agent = excluded.user_agent,
+                vapid_public_key_hash = excluded.vapid_public_key_hash,
                 last_error = NULL",
             params![
                 subscription.id,
@@ -513,6 +525,7 @@ impl Storage {
                 subscription.user_agent,
                 subscription.created_at.to_rfc3339(),
                 subscription.status,
+                subscription.vapid_public_key_hash,
             ],
         )?;
         info!("Upserted push subscription: {}", subscription.id);
@@ -522,7 +535,7 @@ impl Storage {
     pub fn list_active_push_subscriptions(&self) -> Result<Vec<PushSubscription>, StorageError> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, endpoint, p256dh, auth, user_agent, created_at, last_success_at, last_error, status
+            "SELECT id, endpoint, p256dh, auth, user_agent, created_at, last_success_at, last_error, status, vapid_public_key_hash
              FROM push_subscriptions WHERE status = 'active'",
         )?;
 
@@ -545,6 +558,7 @@ impl Storage {
                 }),
                 last_error: row.get(7)?,
                 status: row.get(8)?,
+                vapid_public_key_hash: row.get(9)?,
             })
         })?;
 
@@ -555,7 +569,11 @@ impl Storage {
         Ok(subs)
     }
 
-    pub fn update_push_subscription_error(&self, id: &str, error: &str) -> Result<(), StorageError> {
+    pub fn update_push_subscription_error(
+        &self,
+        id: &str,
+        error: &str,
+    ) -> Result<(), StorageError> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "UPDATE push_subscriptions SET last_error = ?1 WHERE id = ?2",

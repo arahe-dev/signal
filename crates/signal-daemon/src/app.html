@@ -3,11 +3,16 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta name="theme-color" content="#007aff">
+    <meta name="theme-color" content="#f5f5f7">
     <meta name="apple-mobile-web-app-capable" content="yes">
-    <meta name="apple-mobile-web-app-status-bar-style" content="default">
     <meta name="apple-mobile-web-app-title" content="Signal">
+    <meta name="apple-mobile-web-app-status-bar-style" content="default">
     <title>Signal - PWA</title>
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png?v=2">
+    <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png?v=2">
+    <link rel="apple-touch-icon-precomposed" href="/apple-touch-icon-precomposed.png?v=2">
+    <link rel="icon" type="image/png" sizes="192x192" href="/icon-192.png">
+    <link rel="icon" type="image/png" sizes="512x512" href="/icon-512.png">
     <link rel="manifest" href="/manifest.webmanifest">
     <style>
         * {
@@ -126,7 +131,8 @@
             }
 
             if (Notification.permission === 'granted') {
-                showStatus('Notifications already enabled!', 'success');
+                showStatus('Notifications already enabled. Refreshing push subscription...', 'info');
+                await subscribeToPush();
                 return;
             }
 
@@ -150,12 +156,22 @@
                 const registration = await navigator.serviceWorker.register('/service-worker.js');
                 console.log('Service Worker registered:', registration);
 
+                const keyResponse = await fetch('/api/push/vapid-public-key');
+                const keyResult = await keyResponse.json();
+                if (!keyResult.public_key) {
+                    throw new Error('VAPID public key is not configured');
+                }
+
                 const subscription = await registration.pushManager.subscribe({
                     userVisibleOnly: true,
-                    applicationServerKey: urlBase64ToUint8Array('')
+                    applicationServerKey: urlBase64ToUint8Array(keyResult.public_key)
                 });
 
                 console.log('Push subscription:', subscription);
+                const subscriptionJson = subscription.toJSON();
+                if (!subscriptionJson.keys?.p256dh || !subscriptionJson.keys?.auth) {
+                    throw new Error('Push subscription keys are missing');
+                }
 
                 const response = await fetch('/api/push/subscribe', {
                     method: 'POST',
@@ -164,10 +180,10 @@
                         'X-Signal-Token': token || ''
                     },
                     body: JSON.stringify({
-                        endpoint: subscription.endpoint,
+                        endpoint: subscriptionJson.endpoint,
                         keys: {
-                            p256dh: subscription.keys.p256dh,
-                            auth: subscription.keys.auth
+                            p256dh: subscriptionJson.keys.p256dh,
+                            auth: subscriptionJson.keys.auth
                         }
                     })
                 });
