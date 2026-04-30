@@ -4,7 +4,8 @@ param(
     [string]$DbPath,
     [string]$PublicBaseUrl,
     [switch]$NoTailscaleServe,
-    [switch]$StopExisting
+    [switch]$StopExisting,
+    [switch]$RunDoctor
 )
 
 $ErrorActionPreference = "Stop"
@@ -76,6 +77,7 @@ if ($StopExisting) {
 }
 
 $localDashboard = "http://127.0.0.1:$($config.port)/dashboard?token=$($config.token)"
+$localServer = "http://127.0.0.1:$($config.port)"
 $phoneUrl = "$($config.public_base_url.TrimEnd('/'))/app?token=$($config.token)"
 
 if ($config.tailscale_serve) {
@@ -94,6 +96,13 @@ Write-Host "Dashboard: $localDashboard"
 Write-Host "Phone:     $phoneUrl"
 Write-Host "Push test: $($config.public_base_url.TrimEnd('/'))/dashboard?token=$($config.token)"
 Write-Host ""
+Write-Host "Doctor:"
+Write-Host "  .\signal-cli.exe --server $localServer --token $($config.token) doctor"
+Write-Host "Doctor with public URL:"
+Write-Host "  .\signal-cli.exe --server $localServer --token $($config.token) doctor --public-url $($config.public_base_url) --check-public"
+Write-Host "Push test:"
+Write-Host "  .\signal-cli.exe --server $localServer --token $($config.token) doctor --check-push"
+Write-Host ""
 
 $daemonArgs = @(
     "--host=$($config.host)",
@@ -108,4 +117,26 @@ $daemonArgs = @(
 if ($config.require_token_for_read) { $daemonArgs += "--require-token-for-read" }
 if ($config.enable_web_push) { $daemonArgs += "--enable-web-push" }
 
-& $exe @daemonArgs
+if ($RunDoctor) {
+    $out = Join-Path $env:TEMP "signal-release-daemon.out.log"
+    $err = Join-Path $env:TEMP "signal-release-daemon.err.log"
+    Remove-Item -LiteralPath $out,$err -Force -ErrorAction SilentlyContinue
+    $process = Start-Process -FilePath $exe -ArgumentList $daemonArgs -WorkingDirectory $distRoot -PassThru -WindowStyle Hidden -RedirectStandardOutput $out -RedirectStandardError $err
+    for ($i = 0; $i -lt 20; $i++) {
+        try {
+            Invoke-RestMethod -Uri "$localServer/health" | Out-Null
+            break
+        } catch {
+            Start-Sleep -Milliseconds 500
+        }
+    }
+    Write-Host ""
+    Write-Host "Running doctor..."
+    & (Join-Path $distRoot "signal-cli.exe") --server $localServer --token $config.token doctor
+    Write-Host ""
+    Write-Host "Daemon process id: $($process.Id)"
+    Write-Host "Logs: $out"
+    Write-Host "Errors: $err"
+} else {
+    & $exe @daemonArgs
+}

@@ -134,6 +134,19 @@ The dashboard also has a dangerous Reset all devices button. It preserves messag
 
 ## Troubleshooting
 
+Run doctor first:
+
+```powershell
+.\dist\signal\signal-cli.exe --server http://127.0.0.1:8791 --token dev-token doctor
+```
+
+Run public URL and push checks:
+
+```powershell
+.\dist\signal\signal-cli.exe --server http://127.0.0.1:8791 --token dev-token doctor --public-url https://your-device.your-tailnet.ts.net --check-public
+.\dist\signal\signal-cli.exe --server http://127.0.0.1:8791 --token dev-token doctor --check-push
+```
+
 - Dashboard says no active push subscriptions: pair the phone, open `/app`, and tap Enable Notifications.
 - Push shows legacy/unbound subscriptions: re-enable notifications from the paired phone, or use Test Push when exactly one active device exists so Signal can claim the legacy subscription.
 - iPhone icon or push state looks stale: delete the Home Screen icon, clear Safari website data for the Tailscale host, reopen the phone URL, and add to Home Screen again.

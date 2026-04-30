@@ -34,8 +34,13 @@ Copy-Item -LiteralPath (Join-Path $repoRoot "README.md") -Destination $distSigna
 Copy-Item -LiteralPath (Join-Path $repoRoot "signal.config.example.json") -Destination $distSignal
 Copy-Item -LiteralPath (Join-Path $repoRoot "docs\PHASE_B_MANUAL_TEST.md") -Destination (Join-Path $distSignal "docs")
 Copy-Item -LiteralPath (Join-Path $repoRoot "docs\PHASE_C_RELEASE_CHECKLIST.md") -Destination (Join-Path $distSignal "docs")
+Copy-Item -LiteralPath (Join-Path $repoRoot "docs\PHASE_D_DOCTOR.md") -Destination (Join-Path $distSignal "docs")
 Copy-Item -LiteralPath (Join-Path $repoRoot "scripts\start_release.ps1") -Destination (Join-Path $distSignal "scripts")
 
 Write-Host ""
 Write-Host "Release dist created:"
 Write-Host "  $distSignal"
+Write-Host ""
+Write-Host "Next:"
+Write-Host "  cd dist\signal"
+Write-Host "  powershell -ExecutionPolicy Bypass -File .\scripts\start_release.ps1 -RunDoctor"
