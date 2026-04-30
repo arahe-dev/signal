@@ -7,7 +7,7 @@ use std::time::Duration;
 #[command(name = "signal-cli")]
 #[command(about = "Signal CLI - local-first push/reply protocol client", long_about = None)]
 struct Cli {
-    #[arg(long, default_value = "http://127.0.0.1:8787")]
+    #[arg(long, default_value = "http://127.0.0.1:8791")]
     server: String,
 
     #[arg(long)]
@@ -107,6 +107,20 @@ enum Commands {
     Devices {
         #[command(subcommand)]
         subcommand: DevicesSubcommand,
+    },
+    Doctor {
+        #[arg(long)]
+        json: bool,
+        #[arg(long)]
+        public_url: Option<String>,
+        #[arg(long)]
+        check_public: bool,
+        #[arg(long)]
+        check_push: bool,
+        #[arg(long, default_value_t = 10)]
+        timeout_seconds: u64,
+        #[arg(long)]
+        strict: bool,
     },
 }
 
@@ -272,6 +286,168 @@ struct DeviceResetResponse {
     devices_revoked: usize,
     subscriptions_revoked: usize,
     pairing_codes_cleared: usize,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+struct HealthResponse {
+    ok: bool,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+struct DiagnosticsResponse {
+    #[serde(default)]
+    daemon_running: bool,
+    #[serde(default)]
+    version: String,
+    #[serde(default)]
+    db_path: String,
+    #[serde(default)]
+    public_base_url: Option<String>,
+    #[serde(default)]
+    web_push_enabled: bool,
+    #[serde(default)]
+    vapid_public_key_length: Option<usize>,
+    #[serde(default)]
+    vapid_public_key_first_byte: Option<u8>,
+    #[serde(default)]
+    active_devices: usize,
+    #[serde(default)]
+    revoked_devices: usize,
+    #[serde(default)]
+    active_subscriptions: usize,
+    #[serde(default)]
+    revoked_or_stale_subscriptions: usize,
+    #[serde(default)]
+    legacy_unbound_subscriptions: usize,
+    #[serde(default)]
+    last_push_success_at: Option<String>,
+    #[serde(default)]
+    last_push_error: Option<String>,
+    #[serde(default)]
+    suggested_fix: Option<String>,
+    #[serde(default)]
+    daemon: Option<DiagnosticsDaemon>,
+    #[serde(default)]
+    config: Option<DiagnosticsConfig>,
+    #[serde(default)]
+    vapid: Option<DiagnosticsVapid>,
+    #[serde(default)]
+    devices: Option<DiagnosticsDevices>,
+    #[serde(default)]
+    push_subscriptions: Option<DiagnosticsPushSubscriptions>,
+    #[serde(default)]
+    messages: Option<DiagnosticsMessages>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+struct DiagnosticsDaemon {
+    ok: bool,
+    version: String,
+    db_path: String,
+    server_time: String,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+struct DiagnosticsConfig {
+    public_base_url: Option<String>,
+    web_push_enabled: bool,
+    require_token_for_read: bool,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+struct DiagnosticsVapid {
+    public_key_present: bool,
+    public_key_len: Option<usize>,
+    public_key_first_byte: Option<u8>,
+    private_matches_public: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+struct DiagnosticsDevices {
+    active: usize,
+    revoked: usize,
+    total: usize,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+struct DiagnosticsPushSubscriptions {
+    active: usize,
+    revoked: usize,
+    stale: usize,
+    legacy: usize,
+    total: usize,
+    last_success_at: Option<String>,
+    last_error: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+struct DiagnosticsMessages {
+    active_pending: usize,
+    last_ask_at: Option<String>,
+    last_reply_at: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct PushTestRequest {
+    title: String,
+    body: String,
+    url: String,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+struct PushTestResponse {
+    success: bool,
+    message: Option<String>,
+    summary: Option<PushSummary>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+struct PushSummary {
+    attempted: usize,
+    sent: usize,
+    failed: usize,
+    skipped: usize,
+    skipped_revoked: usize,
+    skipped_stale: usize,
+    skipped_legacy: usize,
+    #[serde(default)]
+    errors: Vec<PushError>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+struct PushError {
+    error: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+enum DoctorStatus {
+    Pass,
+    Warn,
+    Fail,
+    Info,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+struct DoctorCheck {
+    name: String,
+    status: DoctorStatus,
+    message: String,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+struct DoctorSummary {
+    passes: usize,
+    warnings: usize,
+    failures: usize,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+struct DoctorOutput {
+    ok: bool,
+    checks: Vec<DoctorCheck>,
+    summary: DoctorSummary,
+    suggested_next_steps: Vec<String>,
 }
 
 struct ApiClient {
@@ -453,6 +629,38 @@ impl ApiClient {
         let response = self.add_auth(self.client.post(&url)).send().await?;
         parse_response(response, "reset all devices").await
     }
+
+    async fn health_at(
+        &self,
+        base_url: &str,
+    ) -> Result<HealthResponse, Box<dyn std::error::Error>> {
+        let url = format!("{}/health", base_url.trim_end_matches('/'));
+        let response = self.client.get(&url).send().await?;
+        parse_response(response, "health").await
+    }
+
+    async fn diagnostics_at(
+        &self,
+        base_url: &str,
+    ) -> Result<DiagnosticsResponse, Box<dyn std::error::Error>> {
+        let url = format!("{}/api/diagnostics", base_url.trim_end_matches('/'));
+        let response = self.add_auth(self.client.get(&url)).send().await?;
+        parse_response(response, "diagnostics").await
+    }
+
+    async fn test_push(&self) -> Result<PushTestResponse, Box<dyn std::error::Error>> {
+        let url = format!("{}/api/push/test", self.base_url);
+        let response = self
+            .add_auth(self.client.post(&url))
+            .json(&PushTestRequest {
+                title: "Signal doctor".to_string(),
+                body: "Diagnostic push test".to_string(),
+                url: "/app".to_string(),
+            })
+            .send()
+            .await?;
+        parse_response(response, "push test").await
+    }
 }
 
 async fn parse_response<T: for<'de> Deserialize<'de>>(
@@ -485,12 +693,263 @@ pub fn parse_timeout_seconds(input: &str) -> Result<u64, String> {
     Ok(value.saturating_mul(multiplier))
 }
 
+fn check(name: &str, status: DoctorStatus, message: impl Into<String>) -> DoctorCheck {
+    DoctorCheck {
+        name: name.to_string(),
+        status,
+        message: message.into(),
+    }
+}
+
+fn summarize_doctor(checks: Vec<DoctorCheck>, strict: bool) -> DoctorOutput {
+    let mut summary = DoctorSummary::default();
+    let mut suggested_next_steps = Vec::new();
+    for check in &checks {
+        match check.status {
+            DoctorStatus::Pass => summary.passes += 1,
+            DoctorStatus::Warn => summary.warnings += 1,
+            DoctorStatus::Fail => summary.failures += 1,
+            DoctorStatus::Info => {}
+        }
+
+        if check.status != DoctorStatus::Pass {
+            match check.name.as_str() {
+                "active_device" => {
+                    suggested_next_steps.push("Pair a phone from the dashboard".to_string())
+                }
+                "active_push_subscription" => {
+                    suggested_next_steps.push("Tap Enable Notifications in the PWA".to_string())
+                }
+                "public_url" => suggested_next_steps.push(
+                    "Run tailscale serve --bg --https=443 http://127.0.0.1:<port>".to_string(),
+                ),
+                "vapid" => suggested_next_steps.push(
+                    "Check VAPID config and re-subscribe the phone if keys changed".to_string(),
+                ),
+                "local_daemon" => {
+                    suggested_next_steps.push("Start the daemon or check the port".to_string())
+                }
+                _ => {}
+            }
+        }
+    }
+    suggested_next_steps.sort();
+    suggested_next_steps.dedup();
+    let ok = summary.failures == 0 && (!strict || summary.warnings == 0);
+    DoctorOutput {
+        ok,
+        checks,
+        summary,
+        suggested_next_steps,
+    }
+}
+
+fn evaluate_diagnostics(d: &DiagnosticsResponse) -> Vec<DoctorCheck> {
+    let mut checks = Vec::new();
+    checks.push(check(
+        "diagnostics",
+        DoctorStatus::Pass,
+        format!("db={} version={}", d.db_path, d.version),
+    ));
+
+    if d.web_push_enabled {
+        checks.push(check("web_push", DoctorStatus::Pass, "enabled"));
+    } else {
+        checks.push(check("web_push", DoctorStatus::Fail, "disabled"));
+    }
+
+    let vapid_private_matches = d.vapid.as_ref().and_then(|v| v.private_matches_public);
+    if d.vapid_public_key_length == Some(65)
+        && d.vapid_public_key_first_byte == Some(4)
+        && vapid_private_matches != Some(false)
+    {
+        checks.push(check(
+            "vapid",
+            DoctorStatus::Pass,
+            "public key valid: len=65 first=4",
+        ));
+    } else {
+        let mut message = format!(
+            "invalid VAPID public key: len={:?} first={:?}",
+            d.vapid_public_key_length, d.vapid_public_key_first_byte
+        );
+        if vapid_private_matches == Some(false) {
+            message.push_str("; private/public mismatch");
+        }
+        checks.push(check("vapid", DoctorStatus::Fail, message));
+    }
+
+    if d.active_devices == 0 {
+        checks.push(check(
+            "active_device",
+            DoctorStatus::Warn,
+            "No active paired devices",
+        ));
+    } else {
+        checks.push(check(
+            "active_device",
+            DoctorStatus::Pass,
+            format!("{} active device(s)", d.active_devices),
+        ));
+    }
+
+    if d.revoked_devices > 0 {
+        checks.push(check(
+            "revoked_devices",
+            DoctorStatus::Info,
+            format!("{} revoked device(s)", d.revoked_devices),
+        ));
+    }
+
+    if d.active_subscriptions == 0 {
+        checks.push(check(
+            "active_push_subscription",
+            DoctorStatus::Warn,
+            "No active device-bound push subscriptions",
+        ));
+    } else {
+        checks.push(check(
+            "active_push_subscription",
+            DoctorStatus::Pass,
+            format!(
+                "{} active device-bound subscription(s)",
+                d.active_subscriptions
+            ),
+        ));
+    }
+
+    if d.legacy_unbound_subscriptions > 0 {
+        checks.push(check(
+            "legacy_subscriptions",
+            DoctorStatus::Warn,
+            format!(
+                "{} legacy/unbound subscription(s)",
+                d.legacy_unbound_subscriptions
+            ),
+        ));
+    }
+    if d.revoked_or_stale_subscriptions > 0 {
+        checks.push(check(
+            "revoked_or_stale_subscriptions",
+            DoctorStatus::Info,
+            format!(
+                "{} revoked/stale subscription(s)",
+                d.revoked_or_stale_subscriptions
+            ),
+        ));
+    }
+    if let Some(success) = &d.last_push_success_at {
+        checks.push(check(
+            "last_push_success",
+            DoctorStatus::Info,
+            format!("last success at {}", success),
+        ));
+    }
+    if let Some(error) = &d.last_push_error {
+        checks.push(check(
+            "last_push_error",
+            DoctorStatus::Info,
+            format!("last error: {}", error),
+        ));
+    }
+    checks
+}
+
+fn evaluate_push_test(response: &PushTestResponse) -> Vec<DoctorCheck> {
+    let mut checks = Vec::new();
+    let Some(summary) = &response.summary else {
+        checks.push(check(
+            "push_test",
+            DoctorStatus::Fail,
+            response
+                .message
+                .clone()
+                .unwrap_or_else(|| "missing push summary".to_string()),
+        ));
+        return checks;
+    };
+
+    if summary.attempted == 0 {
+        let reason = if summary.skipped_legacy > 0 {
+            "No active device-bound subscriptions; only legacy/unbound subscriptions were skipped"
+        } else if summary.skipped_revoked > 0 {
+            "No active subscriptions; only revoked subscriptions were skipped"
+        } else if summary.skipped_stale > 0 {
+            "No active subscriptions; only stale subscriptions were skipped"
+        } else {
+            "No active push subscriptions"
+        };
+        checks.push(check("push_test", DoctorStatus::Warn, reason));
+    } else if summary.failed > 0 && summary.sent == 0 {
+        checks.push(check(
+            "push_test",
+            DoctorStatus::Fail,
+            format!(
+                "attempted {}, sent {}, failed {}",
+                summary.attempted, summary.sent, summary.failed
+            ),
+        ));
+    } else if summary.failed > 0 {
+        checks.push(check(
+            "push_test",
+            DoctorStatus::Warn,
+            format!(
+                "partial success: attempted {}, sent {}, failed {}",
+                summary.attempted, summary.sent, summary.failed
+            ),
+        ));
+    } else {
+        checks.push(check(
+            "push_test",
+            DoctorStatus::Pass,
+            format!(
+                "attempted {}, sent {}, failed {}, skipped {}",
+                summary.attempted, summary.sent, summary.failed, summary.skipped
+            ),
+        ));
+    }
+
+    for error in &summary.errors {
+        if let Some(message) = &error.error {
+            checks.push(check("push_error", DoctorStatus::Info, message.clone()));
+        }
+    }
+    checks
+}
+
+fn print_doctor_human(output: &DoctorOutput) {
+    println!("Signal Doctor");
+    println!("=============");
+    for check in &output.checks {
+        let label = match check.status {
+            DoctorStatus::Pass => "PASS",
+            DoctorStatus::Warn => "WARN",
+            DoctorStatus::Fail => "FAIL",
+            DoctorStatus::Info => "INFO",
+        };
+        println!("[{}] {}: {}", label, check.name, check.message);
+    }
+    println!(
+        "\nSummary: {} pass, {} warn, {} fail",
+        output.summary.passes, output.summary.warnings, output.summary.failures
+    );
+    if !output.suggested_next_steps.is_empty() {
+        println!("\nSuggested next steps:");
+        for step in &output.suggested_next_steps {
+            println!("- {}", step);
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
 
     let wait_timeout = match &cli.command {
         Commands::Ask { timeout, .. } => parse_timeout_seconds(timeout).unwrap_or(600) + 15,
+        Commands::Doctor {
+            timeout_seconds, ..
+        } => *timeout_seconds,
         _ => 10,
     };
     let client = ApiClient::new(
@@ -729,6 +1188,120 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
         },
+        Commands::Doctor {
+            json,
+            public_url,
+            check_public,
+            check_push,
+            timeout_seconds: _,
+            strict,
+        } => {
+            let mut checks = Vec::new();
+            let mut diagnostics = None;
+
+            match client.health_at(&client.base_url).await {
+                Ok(health) if health.ok => checks.push(check(
+                    "local_daemon",
+                    DoctorStatus::Pass,
+                    format!("reachable: {}", client.base_url),
+                )),
+                Ok(_) => checks.push(check(
+                    "local_daemon",
+                    DoctorStatus::Fail,
+                    format!("health returned not ok: {}", client.base_url),
+                )),
+                Err(error) => checks.push(check(
+                    "local_daemon",
+                    DoctorStatus::Fail,
+                    format!("unreachable {}: {}", client.base_url, error),
+                )),
+            }
+
+            match client.diagnostics_at(&client.base_url).await {
+                Ok(d) => {
+                    checks.push(check("auth", DoctorStatus::Pass, "accepted"));
+                    checks.extend(evaluate_diagnostics(&d));
+                    diagnostics = Some(d);
+                }
+                Err(error) => {
+                    let message = error.to_string();
+                    let auth_message = if message.contains("401") || message.contains("403") {
+                        "Token rejected. Use dashboard token/dev token or pair device again."
+                            .to_string()
+                    } else {
+                        format!("diagnostics failed: {}", message)
+                    };
+                    checks.push(check("auth", DoctorStatus::Fail, auth_message));
+                }
+            }
+
+            let public_target = if check_public {
+                public_url.or_else(|| diagnostics.as_ref().and_then(|d| d.public_base_url.clone()))
+            } else {
+                public_url
+            };
+            if check_public || public_target.is_some() {
+                if let Some(public_url) = public_target {
+                    let public_url = public_url.trim_end_matches('/').to_string();
+                    match client.health_at(&public_url).await {
+                        Ok(health) if health.ok => checks.push(check(
+                            "public_url",
+                            DoctorStatus::Pass,
+                            format!("reachable: {}", public_url),
+                        )),
+                        Ok(_) => checks.push(check(
+                            "public_url",
+                            DoctorStatus::Fail,
+                            format!("health not ok: {}", public_url),
+                        )),
+                        Err(error) => checks.push(check(
+                            "public_url",
+                            DoctorStatus::Fail,
+                            format!("unreachable {}: {}", public_url, error),
+                        )),
+                    }
+                    match client.diagnostics_at(&public_url).await {
+                        Ok(_) => checks.push(check(
+                            "public_diagnostics",
+                            DoctorStatus::Pass,
+                            "public diagnostics reachable",
+                        )),
+                        Err(error) => checks.push(check(
+                            "public_diagnostics",
+                            DoctorStatus::Fail,
+                            format!("public diagnostics failed: {}", error),
+                        )),
+                    }
+                } else {
+                    checks.push(check(
+                        "public_url",
+                        DoctorStatus::Warn,
+                        "no public URL configured",
+                    ));
+                }
+            }
+
+            if check_push {
+                match client.test_push().await {
+                    Ok(response) => checks.extend(evaluate_push_test(&response)),
+                    Err(error) => checks.push(check(
+                        "push_test",
+                        DoctorStatus::Fail,
+                        format!("push test failed: {}", error),
+                    )),
+                }
+            }
+
+            let output = summarize_doctor(checks, strict);
+            if json {
+                println!("{}", serde_json::to_string_pretty(&output)?);
+            } else {
+                print_doctor_human(&output);
+            }
+            if !output.ok {
+                std::process::exit(1);
+            }
+        }
     }
 
     Ok(())
@@ -736,7 +1309,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_timeout_seconds;
+    use super::{
+        evaluate_diagnostics, evaluate_push_test, parse_timeout_seconds, summarize_doctor,
+        DiagnosticsResponse, DoctorStatus, PushSummary, PushTestResponse,
+    };
 
     #[test]
     fn timeout_parsing_supports_seconds_minutes_hours() {
@@ -744,5 +1320,112 @@ mod tests {
         assert_eq!(parse_timeout_seconds("10m").unwrap(), 600);
         assert_eq!(parse_timeout_seconds("1h").unwrap(), 3600);
         assert_eq!(parse_timeout_seconds("42").unwrap(), 42);
+    }
+
+    #[test]
+    fn doctor_evaluation_marks_valid_diagnostics_as_pass() {
+        let diagnostics = DiagnosticsResponse {
+            daemon_running: true,
+            version: "0.1.0".to_string(),
+            db_path: ".\\signal.db".to_string(),
+            public_base_url: Some("https://example.test".to_string()),
+            web_push_enabled: true,
+            vapid_public_key_length: Some(65),
+            vapid_public_key_first_byte: Some(4),
+            active_devices: 1,
+            active_subscriptions: 1,
+            ..Default::default()
+        };
+        let checks = evaluate_diagnostics(&diagnostics);
+        assert!(checks
+            .iter()
+            .any(|check| check.name == "vapid" && check.status == DoctorStatus::Pass));
+        assert!(checks
+            .iter()
+            .any(|check| check.name == "active_push_subscription"
+                && check.status == DoctorStatus::Pass));
+    }
+
+    #[test]
+    fn doctor_evaluation_fails_invalid_vapid() {
+        let diagnostics = DiagnosticsResponse {
+            web_push_enabled: true,
+            vapid_public_key_length: Some(64),
+            vapid_public_key_first_byte: Some(2),
+            active_devices: 1,
+            active_subscriptions: 1,
+            ..Default::default()
+        };
+        let checks = evaluate_diagnostics(&diagnostics);
+        assert!(checks
+            .iter()
+            .any(|check| check.name == "vapid" && check.status == DoctorStatus::Fail));
+    }
+
+    #[test]
+    fn doctor_evaluation_warns_on_zero_active_subscriptions() {
+        let diagnostics = DiagnosticsResponse {
+            web_push_enabled: true,
+            vapid_public_key_length: Some(65),
+            vapid_public_key_first_byte: Some(4),
+            active_devices: 1,
+            active_subscriptions: 0,
+            ..Default::default()
+        };
+        let checks = evaluate_diagnostics(&diagnostics);
+        assert!(checks.iter().any(|check| {
+            check.name == "active_push_subscription" && check.status == DoctorStatus::Warn
+        }));
+    }
+
+    #[test]
+    fn doctor_evaluation_warns_on_legacy_subscriptions() {
+        let diagnostics = DiagnosticsResponse {
+            web_push_enabled: true,
+            vapid_public_key_length: Some(65),
+            vapid_public_key_first_byte: Some(4),
+            active_devices: 1,
+            active_subscriptions: 1,
+            legacy_unbound_subscriptions: 2,
+            ..Default::default()
+        };
+        let checks = evaluate_diagnostics(&diagnostics);
+        assert!(checks.iter().any(
+            |check| check.name == "legacy_subscriptions" && check.status == DoctorStatus::Warn
+        ));
+    }
+
+    #[test]
+    fn doctor_json_shape_has_summary_and_next_steps() {
+        let diagnostics = DiagnosticsResponse {
+            web_push_enabled: true,
+            vapid_public_key_length: Some(65),
+            vapid_public_key_first_byte: Some(4),
+            active_devices: 0,
+            active_subscriptions: 0,
+            ..Default::default()
+        };
+        let output = summarize_doctor(evaluate_diagnostics(&diagnostics), false);
+        let value = serde_json::to_value(&output).unwrap();
+        assert!(value.get("ok").is_some());
+        assert!(value.get("checks").is_some());
+        assert!(value.get("summary").is_some());
+        assert!(value.get("suggested_next_steps").is_some());
+        assert!(!output.suggested_next_steps.is_empty());
+    }
+
+    #[test]
+    fn push_test_attempted_zero_is_warning_not_failure() {
+        let response = PushTestResponse {
+            success: true,
+            message: Some("No active push subscriptions".to_string()),
+            summary: Some(PushSummary {
+                attempted: 0,
+                skipped_legacy: 1,
+                ..Default::default()
+            }),
+        };
+        let checks = evaluate_push_test(&response);
+        assert_eq!(checks[0].status, DoctorStatus::Warn);
     }
 }

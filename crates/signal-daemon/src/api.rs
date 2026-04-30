@@ -1,8 +1,8 @@
 use crate::app_state::{AppState, AuthFailure, AuthIdentity};
 use crate::html;
 use crate::web_push_sender::{
-    build_ask_payload, build_message_payload, build_message_url, send_web_push_to_all_active,
-    VapidConfig,
+    build_ask_payload, build_message_payload, build_message_url, private_matches_public,
+    send_web_push_to_all_active, VapidConfig,
 };
 use axum::{
     body::Bytes,
@@ -90,6 +90,60 @@ pub struct DiagnosticsResponse {
     last_push_error: Option<String>,
     last_ask_or_reply_event: Option<String>,
     suggested_fix: Option<String>,
+    daemon: DiagnosticsDaemon,
+    config: DiagnosticsConfig,
+    vapid: DiagnosticsVapid,
+    devices: DiagnosticsDevices,
+    push_subscriptions: DiagnosticsPushSubscriptions,
+    messages: DiagnosticsMessages,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DiagnosticsDaemon {
+    ok: bool,
+    version: String,
+    db_path: String,
+    server_time: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DiagnosticsConfig {
+    public_base_url: Option<String>,
+    web_push_enabled: bool,
+    require_token_for_read: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DiagnosticsVapid {
+    public_key_present: bool,
+    public_key_len: Option<usize>,
+    public_key_first_byte: Option<u8>,
+    private_matches_public: Option<bool>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DiagnosticsDevices {
+    active: usize,
+    revoked: usize,
+    total: usize,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DiagnosticsPushSubscriptions {
+    active: usize,
+    revoked: usize,
+    stale: usize,
+    legacy: usize,
+    total: usize,
+    last_success_at: Option<String>,
+    last_error: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DiagnosticsMessages {
+    active_pending: usize,
+    last_ask_at: Option<String>,
+    last_reply_at: Option<String>,
 }
 
 fn make_error_response(
@@ -494,17 +548,28 @@ fn build_diagnostics(state: &AppState) -> DiagnosticsResponse {
         .iter()
         .filter_map(|subscription| subscription.last_error.clone())
         .next();
-    let last_ask_or_reply_event = state
-        .storage
-        .list_events(25)
-        .unwrap_or_default()
-        .into_iter()
+    let events = state.storage.list_events(100).unwrap_or_default();
+    let last_ask_at = events
+        .iter()
+        .find(|event| event.event_type.contains("ask") || event.event_type.contains("message"))
+        .map(|event| event.created_at.to_rfc3339());
+    let last_reply_at = events
+        .iter()
+        .find(|event| event.event_type.contains("reply"))
+        .map(|event| event.created_at.to_rfc3339());
+    let last_ask_or_reply_event = events
+        .iter()
         .find(|event| {
             event.event_type.contains("ask")
                 || event.event_type.contains("reply")
                 || event.event_type.contains("message")
         })
         .map(|event| format!("{} at {}", event.event_type, event.created_at.to_rfc3339()));
+    let active_pending = state
+        .storage
+        .list_messages(None, Some(MessageStatus::PendingReply), None, None)
+        .map(|messages| messages.len())
+        .unwrap_or_default();
     let (vapid_public_key_length, vapid_public_key_first_byte) = state
         .vapid_config
         .as_ref()
@@ -521,6 +586,10 @@ fn build_diagnostics(state: &AppState) -> DiagnosticsResponse {
         .vapid_config
         .as_ref()
         .and_then(|config| config.public_base_url.clone());
+    let vapid_private_matches_public = state
+        .vapid_config
+        .as_ref()
+        .map(|config| private_matches_public(&config.private_key, &config.public_key));
     let suggested_fix = if state.enable_web_push && push_counts.active_bound == 0 {
         Some(
             "Pair a phone, open /app on that phone, tap Enable Notifications, then retry Test Push."
@@ -528,6 +597,43 @@ fn build_diagnostics(state: &AppState) -> DiagnosticsResponse {
         )
     } else {
         None
+    };
+
+    let daemon = DiagnosticsDaemon {
+        ok: true,
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        db_path: state.db_path.clone(),
+        server_time: Utc::now().to_rfc3339(),
+    };
+    let config = DiagnosticsConfig {
+        public_base_url: public_base_url.clone(),
+        web_push_enabled: state.enable_web_push,
+        require_token_for_read: state.require_token_for_read,
+    };
+    let vapid = DiagnosticsVapid {
+        public_key_present: state.vapid_config.is_some(),
+        public_key_len: vapid_public_key_length,
+        public_key_first_byte: vapid_public_key_first_byte,
+        private_matches_public: vapid_private_matches_public,
+    };
+    let devices_nested = DiagnosticsDevices {
+        active: active_devices,
+        revoked: revoked_devices,
+        total: devices.len(),
+    };
+    let push_subscriptions = DiagnosticsPushSubscriptions {
+        active: push_counts.active_bound,
+        revoked: push_counts.revoked,
+        stale: push_counts.stale,
+        legacy: push_counts.active_legacy,
+        total: push_counts.total,
+        last_success_at: last_push_success_at.clone(),
+        last_error: last_push_error.clone(),
+    };
+    let messages = DiagnosticsMessages {
+        active_pending,
+        last_ask_at,
+        last_reply_at,
     };
 
     DiagnosticsResponse {
@@ -547,6 +653,12 @@ fn build_diagnostics(state: &AppState) -> DiagnosticsResponse {
         last_push_error,
         last_ask_or_reply_event,
         suggested_fix,
+        daemon,
+        config,
+        vapid,
+        devices: devices_nested,
+        push_subscriptions,
+        messages,
     }
 }
 
@@ -1196,6 +1308,15 @@ async fn dashboard(
             )
         })
         .unwrap_or_default();
+    let setup_next_action = diagnostics.suggested_fix.as_deref().unwrap_or_else(|| {
+        if diagnostics.active_devices == 0 {
+            "Pair a phone"
+        } else if diagnostics.active_subscriptions == 0 {
+            "Open /app on iPhone and tap Enable Notifications"
+        } else {
+            "Run signal-cli doctor --check-push"
+        }
+    });
 
     let devices_html = if device_list.is_empty() {
         "<p class=\"note\">No devices paired yet.</p>".to_string()
@@ -1346,6 +1467,18 @@ async fn dashboard(
                     <div class="stat-label">Legacy/Unbound Push</div>
                 </div>
             </div>
+        </div>
+
+        <div class="card">
+            <h2>Setup Health</h2>
+            <p class="note">Local daemon: <strong>pass</strong></p>
+            <p class="note">Public URL: <strong>{}</strong></p>
+            <p class="note">Web Push: <strong>{}</strong></p>
+            <p class="note">Active devices: <strong>{}</strong></p>
+            <p class="note">Active subscriptions: <strong>{}</strong></p>
+            <p class="note">Last push: <strong>{}</strong></p>
+            <p class="note">Suggested next action: <strong>{}</strong></p>
+            <p class="note">CLI: <code>signal-cli --server http://127.0.0.1:8791 --token dev-token doctor --check-push</code></p>
         </div>
 
         <div class="card">
@@ -1659,6 +1792,24 @@ async fn dashboard(
         push_counts.active_bound,
         push_counts.revoked_or_stale,
         push_counts.active_legacy,
+        if diagnostics.public_base_url.is_some() {
+            "configured"
+        } else {
+            "missing"
+        },
+        if diagnostics.web_push_enabled {
+            "pass"
+        } else {
+            "fail"
+        },
+        diagnostics.active_devices,
+        diagnostics.active_subscriptions,
+        diagnostics
+            .last_push_success_at
+            .as_deref()
+            .or(diagnostics.last_push_error.as_deref())
+            .unwrap_or("none"),
+        escape_html(setup_next_action),
         if diagnostics.web_push_enabled {
             "on"
         } else {
@@ -2323,6 +2474,10 @@ mod tests {
         assert_eq!(diagnostics.revoked_devices, 1);
         assert_eq!(diagnostics.active_subscriptions, 1);
         assert_eq!(diagnostics.legacy_unbound_subscriptions, 1);
+        assert_eq!(diagnostics.daemon.ok, true);
+        assert_eq!(diagnostics.vapid.public_key_present, true);
+        assert_eq!(diagnostics.devices.total, 2);
+        assert_eq!(diagnostics.push_subscriptions.active, 1);
         assert_eq!(
             diagnostics.public_base_url.as_deref(),
             Some("https://example.test")
