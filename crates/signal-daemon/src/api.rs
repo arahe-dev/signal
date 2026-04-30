@@ -138,6 +138,8 @@ pub struct PairStartRequest {
 #[derive(Debug, Serialize)]
 pub struct PairStartResponse {
     pub pairing_code: String,
+    pub code_prefix: String,
+    pub pair_url: String,
     pub qr_data: String,
     pub expires_in_seconds: u64,
 }
@@ -164,12 +166,12 @@ async fn pair_start(
 ) -> Result<Json<PairStartResponse>, axum::response::Response> {
     check_auth(&state, &headers)?;
 
-    // Generate a random pairing code using token generation
-    let pairing_token = signal_core::generate_device_token();
-    let code_hash = signal_core::hash_token(&pairing_token);
-    let code_prefix = signal_core::get_token_prefix(&pairing_token);
+    // Generate a pairing code (format: pair_<base64>)
+    let full_pairing_code = signal_core::generate_pairing_code();
+    let code_hash = signal_core::hash_token(&full_pairing_code);
+    let code_prefix = signal_core::get_token_prefix(&full_pairing_code);
 
-    let pairing_code = signal_core::models::PairingCode::new(
+    let pairing_code_model = signal_core::models::PairingCode::new(
         code_hash.clone(),
         code_prefix.clone(),
         300, // 5 minutes
@@ -177,7 +179,7 @@ async fn pair_start(
 
     state
         .storage
-        .create_pairing_code(&pairing_code)
+        .create_pairing_code(&pairing_code_model)
         .map_err(|e| {
             make_error_response(
                 axum::http::StatusCode::INTERNAL_SERVER_ERROR,
@@ -186,14 +188,23 @@ async fn pair_start(
             )
         })?;
 
-    // Generate QR data - for now just the pairing code
-    // In production this could be a full URL or QR format
-    let qr_data = format!("signal://pair/{}", code_prefix);
+    // Determine the public base URL for the pairing link
+    let public_base_url = state
+        .vapid_config
+        .as_ref()
+        .and_then(|vc| vc.public_base_url.clone())
+        .unwrap_or_else(|| "http://127.0.0.1:8791".to_string());
+
+    // Build pair URL with full pairing code
+    let pair_url = format!("{}/pair?code={}", public_base_url, full_pairing_code);
+    let qr_data = pair_url.clone();
 
     info!("Pairing code generated for device: {}", payload.device_name);
 
     Ok(Json(PairStartResponse {
-        pairing_code: code_prefix,
+        pairing_code: full_pairing_code,
+        code_prefix,
+        pair_url,
         qr_data,
         expires_in_seconds: 300,
     }))
@@ -1184,8 +1195,7 @@ async fn dashboard(
         }}
 
         function displayPairingCode(statusDiv, data) {{
-            const publicBaseUrl = 'https://ari-legion.taild0cc8e.ts.net';
-            const pairingUrl = `${{publicBaseUrl}}/pair?code=${{data.pairing_code}}`;
+            const pairingUrl = data.pair_url;
             
             const expiresIn = data.expires_in_seconds || 300;
             const minutesLeft = Math.floor(expiresIn / 60);
@@ -1197,11 +1207,12 @@ async fn dashboard(
                     </p>
                     
                     <div style="background: white; padding: 12px; border-radius: 6px; margin-bottom: 12px; border: 1px solid #e5e5ea;">
-                        <p style="font-size: 12px; color: #6e6e73; margin-bottom: 6px;">Pairing Code:</p>
+                        <p style="font-size: 12px; color: #6e6e73; margin-bottom: 6px;">Pairing Code (Full):</p>
                         <div style="display: flex; gap: 8px; align-items: center;">
-                            <code style="flex: 1; font-family: monospace; font-size: 14px; padding: 8px; background: #f9f9f9; border-radius: 4px; word-break: break-all;">${{data.pairing_code}}</code>
+                            <code style="flex: 1; font-family: monospace; font-size: 12px; padding: 8px; background: #f9f9f9; border-radius: 4px; word-break: break-all;">${{data.pairing_code}}</code>
                             <button onclick="copyToClipboard('${{data.pairing_code}}')" class="btn" style="margin: 0; white-space: nowrap;">Copy</button>
                         </div>
+                        <p style="font-size: 11px; color: #9c9c9e; margin-top: 6px;">Prefix: ${{data.code_prefix}}</p>
                     </div>
 
                     <p style="font-size: 13px; margin-bottom: 8px; color: #1d1d1f;"><strong>Mobile Device:</strong></p>
@@ -1210,8 +1221,8 @@ async fn dashboard(
                     </a>
 
                     <p style="font-size: 12px; color: #6e6e73; margin-top: 12px;">
-                        <strong>Or enter code on mobile:</strong><br>
-                        ${{pairingUrl}}
+                        <strong>Or share this URL:</strong><br>
+                        <code style="font-size: 11px; word-break: break-all; display: block; background: #fff; padding: 8px; border-radius: 4px; margin-top: 4px;">${{pairingUrl}}</code>
                     </p>
 
                     <button onclick="resetPairing()" class="btn" style="background: #f5f5f7; color: #007aff; border: 1px solid #e5e5ea; margin-top: 12px;">
@@ -1255,6 +1266,222 @@ async fn dashboard(
     Ok(Html(html))
 }
 
+// Pairing page query
+#[derive(Debug, Deserialize)]
+pub struct PairQuery {
+    code: Option<String>,
+}
+
+// Mobile-friendly pairing page
+async fn pair_page(
+    State(state): State<AppState>,
+    axum::extract::Query(query): axum::extract::Query<PairQuery>,
+) -> Result<Html<&'static str>, axum::response::Response> {
+    let code = match &query.code {
+        Some(c) => c,
+        None => {
+            return Ok(Html(
+                r#"<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Signal Pairing</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #fff; color: #1d1d1f; }
+        .container { max-width: 600px; margin: 0 auto; padding: 20px; display: flex; flex-direction: column; min-height: 100vh; justify-content: center; }
+        .card { background: #f5f5f7; border-radius: 12px; padding: 24px; margin: 12px 0; }
+        h1 { font-size: 28px; margin-bottom: 8px; }
+        p { font-size: 15px; color: #6e6e73; margin: 12px 0; line-height: 1.5; }
+        .error { color: #d70015; background: #ffebee; border: 1px solid #ef5350; border-radius: 8px; padding: 12px; margin: 12px 0; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="card">
+            <h1>🔗 Pairing Code Missing</h1>
+            <p>This page requires a pairing code. Please use the pairing link from your desktop.</p>
+            <p style="font-size: 13px; color: #9c9c9e; margin-top: 20px;">If you have a pairing code, visit this page with ?code=your_code</p>
+        </div>
+    </div>
+</body>
+</html>"#,
+            ));
+        }
+    };
+
+    // Check if pairing code is valid
+    let pairing_code_hash = signal_core::hash_token(code);
+    let pairing_code = match state.storage.get_pairing_code(&pairing_code_hash) {
+        Ok(pc) => pc,
+        Err(_) => {
+            return Ok(Html(
+                r#"<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Signal Pairing</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #fff; color: #1d1d1f; }
+        .container { max-width: 600px; margin: 0 auto; padding: 20px; display: flex; flex-direction: column; min-height: 100vh; justify-content: center; }
+        .card { background: #f5f5f7; border-radius: 12px; padding: 24px; margin: 12px 0; }
+        h1 { font-size: 28px; margin-bottom: 8px; }
+        p { font-size: 15px; color: #6e6e73; margin: 12px 0; line-height: 1.5; }
+        .error { color: #d70015; background: #ffebee; border: 1px solid #ef5350; border-radius: 8px; padding: 12px; margin: 12px 0; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="card">
+            <h1>❌ Invalid or Expired Code</h1>
+            <div class="error">This pairing code is invalid, expired, or has already been used.</div>
+            <p>Please request a new pairing code from your desktop and try again.</p>
+        </div>
+    </div>
+</body>
+</html>"#,
+            ));
+        }
+    };
+
+    if !pairing_code.is_valid() {
+        return Ok(Html(
+            r#"<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Signal Pairing</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #fff; color: #1d1d1f; }
+        .container { max-width: 600px; margin: 0 auto; padding: 20px; display: flex; flex-direction: column; min-height: 100vh; justify-content: center; }
+        .card { background: #f5f5f7; border-radius: 12px; padding: 24px; margin: 12px 0; }
+        h1 { font-size: 28px; margin-bottom: 8px; }
+        p { font-size: 15px; color: #6e6e73; margin: 12px 0; line-height: 1.5; }
+        .error { color: #d70015; background: #ffebee; border: 1px solid #ef5350; border-radius: 8px; padding: 12px; margin: 12px 0; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="card">
+            <h1>❌ Code Expired or Used</h1>
+            <div class="error">This pairing code has expired or has already been used.</div>
+            <p>Please request a new pairing code from your desktop and try again.</p>
+        </div>
+    </div>
+</body>
+</html>"#,
+        ));
+    }
+
+    // Return the pairing page with hidden code
+    let html = format!(
+        r#"<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Pair Device to Signal</title>
+    <style>
+        * {{ margin: 0; padding: 0; box-sizing: border-box; }}
+        body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #fff; color: #1d1d1f; }}
+        .container {{ max-width: 600px; margin: 0 auto; padding: 20px; display: flex; flex-direction: column; min-height: 100vh; justify-content: center; }}
+        .card {{ background: #f5f5f7; border-radius: 12px; padding: 24px; margin: 12px 0; }}
+        h1 {{ font-size: 28px; margin-bottom: 8px; }}
+        p {{ font-size: 15px; color: #6e6e73; margin: 12px 0; line-height: 1.5; }}
+        input {{ width: 100%; padding: 12px; border: 1px solid #e5e5ea; border-radius: 8px; font-size: 15px; margin: 12px 0; font-family: inherit; }}
+        button {{ width: 100%; padding: 12px; background: #007aff; color: white; border: none; border-radius: 8px; font-size: 15px; font-weight: 600; cursor: pointer; margin-top: 12px; }}
+        button:disabled {{ background: #d1d1d6; cursor: not-allowed; }}
+        .status {{ padding: 12px; border-radius: 8px; margin: 12px 0; display: none; }}
+        .status.info {{ background: #e3f2fd; color: #1565c0; display: block; }}
+        .status.error {{ background: #ffebee; color: #d70015; display: block; }}
+        .status.success {{ background: #e8f5e9; color: #2e7d32; display: block; }}
+        code {{ font-family: monospace; font-size: 13px; background: white; padding: 8px; border-radius: 4px; display: block; margin: 8px 0; word-break: break-all; }}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="card">
+            <h1>🔗 Pair This Device</h1>
+            <p>Enter a name for this device and tap Pair to connect it to Signal.</p>
+            
+            <input type="text" id="device-name" placeholder="Device name (e.g., iPhone, iPad)" autofocus>
+            <button id="pair-btn" onclick="completePair()">Pair Device</button>
+            
+            <div id="status" class="status"></div>
+            
+            <p style="font-size: 13px; color: #9c9c9e; margin-top: 20px;">After pairing, you will be able to send and receive messages on this device.</p>
+        </div>
+    </div>
+
+    <script>
+        const PAIRING_CODE = '{code}';
+        
+        function showStatus(message, type) {{
+            const status = document.getElementById('status');
+            status.textContent = message;
+            status.className = 'status ' + type;
+        }}
+        
+        async function completePair() {{
+            const deviceName = document.getElementById('device-name').value.trim() || 'Device';
+            const btn = document.getElementById('pair-btn');
+            
+            btn.disabled = true;
+            showStatus('Pairing...', 'info');
+            
+            try {{
+                const response = await fetch('/api/pair/complete', {{
+                    method: 'POST',
+                    headers: {{
+                        'Content-Type': 'application/json'
+                    }},
+                    body: JSON.stringify({{
+                        pairing_code: PAIRING_CODE,
+                        device_name: deviceName,
+                        device_kind: 'phone'
+                    }})
+                }});
+                
+                const data = await response.json();
+                
+                if (!response.ok) {{
+                    throw new Error(data.message || 'Pairing failed');
+                }}
+                
+                // Store device token
+                localStorage.setItem('signal_device_token', data.device_token);
+                showStatus('✓ Pairing successful!', 'success');
+                
+                // Redirect to app after 1 second
+                setTimeout(() => {{
+                    window.location.href = '/app';
+                }}, 1000);
+                
+            }} catch (error) {{
+                console.error('Pairing error:', error);
+                showStatus('Error: ' + error.message, 'error');
+                btn.disabled = false;
+            }}
+        }}
+        
+        // Allow Enter to submit
+        document.getElementById('device-name').addEventListener('keypress', function(e) {{
+            if (e.key === 'Enter') completePair();
+        }});
+    </script>
+</body>
+</html>"#,
+        code = code
+    );
+
+    Ok(Html(Box::leak(html.into_boxed_str())))
+}
+
 pub fn create_html_router(
     storage: Arc<Storage>,
     token: Option<String>,
@@ -1263,6 +1490,7 @@ pub fn create_html_router(
     Router::new()
         .route("/", get(inbox_page))
         .route("/dashboard", get(dashboard))
+        .route("/pair", get(pair_page))
         .route("/message/{id}", get(message_detail_page))
         .route("/api/messages/{id}/replies/form", post(reply_form_handler))
         .with_state(AppState::new(storage, token, require_token_for_read))

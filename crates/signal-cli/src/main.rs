@@ -223,6 +223,8 @@ struct AskOutput {
 #[derive(Debug, Deserialize)]
 struct PairStartResponse {
     pairing_code: String,
+    code_prefix: String,
+    pair_url: String,
     qr_data: String,
     expires_in_seconds: u64,
 }
@@ -618,9 +620,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::Pair { subcommand } => match subcommand {
             PairSubcommand::Start { name } => {
                 let response = client.pair_start(name).await?;
-                println!("Pairing code generated: {}", response.pairing_code);
-                println!("QR Data: {}", response.qr_data);
-                println!("Expires in: {} seconds", response.expires_in_seconds);
+                println!("\n✓ Pairing code generated\n");
+                println!("Pairing URL:");
+                println!("{}\n", response.pair_url);
+                println!("Full Code: {}", response.pairing_code);
+                println!("Code Prefix: {}", response.code_prefix);
+                println!("Expires in: {} seconds\n", response.expires_in_seconds);
             }
         },
         Commands::Devices { subcommand } => match subcommand {
