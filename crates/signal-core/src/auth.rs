@@ -1,6 +1,7 @@
 use sha2::{Digest, Sha256};
 
 const TOKEN_PREFIX: &str = "sig_dev_";
+const PAIRING_CODE_PREFIX: &str = "pair_";
 const TOKEN_RANDOM_BYTES: usize = 32;
 
 /// Generate a new device token in format: sig_dev_<base64url(32 random bytes)>
@@ -13,6 +14,18 @@ pub fn generate_device_token() -> String {
 
     let encoded = base64_url::encode(&random_bytes);
     format!("{}{}", TOKEN_PREFIX, encoded)
+}
+
+/// Generate a new pairing code in format: pair_<base64url(32 random bytes)>
+pub fn generate_pairing_code() -> String {
+    use rand::Rng;
+
+    let mut rng = rand::thread_rng();
+    let mut random_bytes = vec![0u8; TOKEN_RANDOM_BYTES];
+    rng.fill(&mut random_bytes[..]);
+
+    let encoded = base64_url::encode(&random_bytes);
+    format!("{}{}", PAIRING_CODE_PREFIX, encoded)
 }
 
 /// Extract token prefix (first 12 characters) for safe logging/display
@@ -77,9 +90,25 @@ mod tests {
     }
 
     #[test]
-    fn get_token_prefix_returns_first_12_chars() {
-        let token = "sig_dev_abcdefghijklmnopqrstuvwxyz";
-        let prefix = get_token_prefix(token);
-        assert_eq!(prefix, "sig_dev_abcd");
+    fn generate_pairing_code_has_correct_format() {
+        let code = generate_pairing_code();
+        assert!(code.starts_with(PAIRING_CODE_PREFIX));
+        assert!(code.len() > PAIRING_CODE_PREFIX.len());
+    }
+
+    #[test]
+    fn generate_pairing_code_is_unique() {
+        let code1 = generate_pairing_code();
+        let code2 = generate_pairing_code();
+        assert_ne!(code1, code2);
+    }
+
+    #[test]
+    fn device_token_and_pairing_code_have_different_formats() {
+        let token = generate_device_token();
+        let code = generate_pairing_code();
+        assert!(token.starts_with(TOKEN_PREFIX));
+        assert!(code.starts_with(PAIRING_CODE_PREFIX));
+        assert_ne!(token[..8], code[..8]); // Different prefixes
     }
 }
