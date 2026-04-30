@@ -1,7 +1,7 @@
 use crate::models::{
     Event, Message, MessageStatus, OutboxEntry, PushSubscription, Reply, ReplyStatus,
 };
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use std::path::Path;
 use std::sync::Mutex;
 use thiserror::Error;
@@ -642,6 +642,52 @@ impl Storage {
         subscription: &PushSubscription,
     ) -> Result<(), StorageError> {
         let conn = self.conn.lock().unwrap();
+
+        if subscription.device_id.is_some() {
+            let existing_id = conn
+                .query_row(
+                    "SELECT id FROM push_subscriptions WHERE endpoint = ?1 ORDER BY created_at DESC LIMIT 1",
+                    params![subscription.endpoint],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()?;
+
+            if let Some(existing_id) = existing_id {
+                conn.execute(
+                    "UPDATE push_subscriptions
+                     SET device_id = ?1,
+                         endpoint = ?2,
+                         p256dh = ?3,
+                         auth = ?4,
+                         user_agent = ?5,
+                         status = 'active',
+                         vapid_public_key_hash = ?6,
+                         last_error = NULL
+                     WHERE id = ?7",
+                    params![
+                        subscription.device_id,
+                        subscription.endpoint,
+                        subscription.p256dh,
+                        subscription.auth,
+                        subscription.user_agent,
+                        subscription.vapid_public_key_hash,
+                        existing_id,
+                    ],
+                )?;
+                conn.execute(
+                    "UPDATE push_subscriptions
+                     SET status = 'revoked', last_error = 'duplicate_endpoint_replaced'
+                     WHERE endpoint = ?1 AND id != ?2",
+                    params![subscription.endpoint, existing_id],
+                )?;
+                info!(
+                    "Claimed existing push subscription endpoint for device: {}",
+                    existing_id
+                );
+                return Ok(());
+            }
+        }
+
         conn.execute(
             "INSERT INTO push_subscriptions (id, device_id, endpoint, p256dh, auth, user_agent, created_at, status, vapid_public_key_hash)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
@@ -668,6 +714,20 @@ impl Storage {
         )?;
         info!("Upserted push subscription: {}", subscription.id);
         Ok(())
+    }
+
+    pub fn claim_active_legacy_push_subscriptions(
+        &self,
+        device_id: &str,
+    ) -> Result<usize, StorageError> {
+        let conn = self.conn.lock().unwrap();
+        let updated = conn.execute(
+            "UPDATE push_subscriptions
+             SET device_id = ?1, status = 'active', last_error = NULL
+             WHERE device_id IS NULL AND status = 'active'",
+            params![device_id],
+        )?;
+        Ok(updated)
     }
 
     pub fn list_active_push_subscriptions(&self) -> Result<Vec<PushSubscription>, StorageError> {
@@ -1449,5 +1509,71 @@ mod tests {
         assert_eq!(counts.active_bound, 1);
         assert_eq!(counts.active_legacy, 1);
         assert_eq!(counts.revoked_or_stale, 1);
+    }
+
+    #[test]
+    fn device_push_subscribe_claims_existing_endpoint() {
+        let storage = make_storage();
+        let device = Device::new(
+            "claim-device".to_string(),
+            "phone".to_string(),
+            "phone".to_string(),
+            crate::hash_token("claim-token"),
+            "claim".to_string(),
+        );
+        storage.create_device(&device).unwrap();
+
+        let legacy = PushSubscription::new(
+            "https://web.push.apple.com/claim".to_string(),
+            "old-p256dh".to_string(),
+            "old-auth".to_string(),
+            None,
+        );
+        storage.upsert_push_subscription(&legacy).unwrap();
+
+        let mut current = PushSubscription::new(
+            "https://web.push.apple.com/claim".to_string(),
+            "new-p256dh".to_string(),
+            "new-auth".to_string(),
+            None,
+        );
+        current.device_id = Some(device.id.clone());
+        storage.upsert_push_subscription(&current).unwrap();
+
+        let active = storage.list_active_push_subscriptions().unwrap();
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].device_id.as_deref(), Some(device.id.as_str()));
+        assert_eq!(active[0].p256dh, "new-p256dh");
+        assert_eq!(active[0].auth, "new-auth");
+    }
+
+    #[test]
+    fn active_legacy_push_subscriptions_can_be_claimed() {
+        let storage = make_storage();
+        let device = Device::new(
+            "legacy-claim-device".to_string(),
+            "phone".to_string(),
+            "phone".to_string(),
+            crate::hash_token("legacy-claim-token"),
+            "legacy".to_string(),
+        );
+        storage.create_device(&device).unwrap();
+
+        let legacy = PushSubscription::new(
+            "https://web.push.apple.com/legacy-claim".to_string(),
+            "p256dh".to_string(),
+            "auth".to_string(),
+            None,
+        );
+        storage.upsert_push_subscription(&legacy).unwrap();
+        assert_eq!(storage.push_subscription_counts().unwrap().active_legacy, 1);
+
+        let claimed = storage
+            .claim_active_legacy_push_subscriptions(&device.id)
+            .unwrap();
+        assert_eq!(claimed, 1);
+        let counts = storage.push_subscription_counts().unwrap();
+        assert_eq!(counts.active_legacy, 0);
+        assert_eq!(counts.active_bound, 1);
     }
 }

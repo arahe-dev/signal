@@ -179,6 +179,17 @@ fn select_push_subscriptions(
     storage: &signal_core::Storage,
     include_legacy: bool,
 ) -> Result<PushSelection, signal_core::StorageError> {
+    if !include_legacy {
+        let active_devices = storage
+            .list_devices()?
+            .into_iter()
+            .filter(|device| device.is_active())
+            .collect::<Vec<_>>();
+        if active_devices.len() == 1 {
+            let _ = storage.claim_active_legacy_push_subscriptions(&active_devices[0].id)?;
+        }
+    }
+
     let mut selection = PushSelection::default();
     for subscription in storage.list_push_subscriptions()? {
         if subscription.status != "active" {
@@ -540,6 +551,7 @@ mod tests {
     fn push_selection_skips_revoked_and_legacy_subscriptions() {
         let storage = make_storage();
         let active = add_device(&storage, "active");
+        let _active_two = add_device(&storage, "active-two");
         let revoked = add_device(&storage, "revoked");
         add_subscription(
             &storage,
@@ -558,6 +570,22 @@ mod tests {
         assert_eq!(selection.subscriptions.len(), 1);
         assert_eq!(selection.skipped_revoked, 1);
         assert_eq!(selection.skipped_legacy, 1);
+    }
+
+    #[test]
+    fn push_selection_claims_legacy_when_only_one_active_device_exists() {
+        let storage = make_storage();
+        let active = add_device(&storage, "active");
+        add_subscription(&storage, "https://web.push.apple.com/legacy", None);
+
+        let selection = select_push_subscriptions(&storage, false).unwrap();
+
+        assert_eq!(selection.subscriptions.len(), 1);
+        assert_eq!(
+            selection.subscriptions[0].device_id.as_deref(),
+            Some(active.id.as_str())
+        );
+        assert_eq!(selection.skipped_legacy, 0);
     }
 
     #[test]
