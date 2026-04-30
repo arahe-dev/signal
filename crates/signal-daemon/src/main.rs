@@ -22,7 +22,7 @@ struct Args {
     #[arg(long, default_value = "127.0.0.1")]
     host: String,
 
-    #[arg(long, default_value_t = 8787)]
+    #[arg(long, default_value_t = 8791)]
     port: u16,
 
     #[arg(long, default_value = "./signal_demo.db")]
@@ -85,12 +85,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let storage = Storage::new(&args.db_path)?;
     let storage = Arc::new(storage);
 
-    let html_router = api::create_html_router(
-        storage.clone(),
-        args.token.clone(),
-        args.require_token_for_read,
-    );
-
     let vapid_config = if args.enable_web_push {
         info!("Web Push enabled");
         let vapid_keys = vapid::load_or_generate_vapid_keys(&args.vapid_file)?;
@@ -110,12 +104,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         None
     };
 
+    let html_router = api::create_html_router(
+        storage.clone(),
+        args.token.clone(),
+        args.require_token_for_read,
+        args.enable_web_push,
+        vapid_config.clone(),
+        args.db_path.clone(),
+    );
+
     let api_router = api::create_api_router(
         storage.clone(),
         args.token.clone(),
         args.require_token_for_read,
         args.enable_web_push,
         vapid_config.clone(),
+        args.db_path.clone(),
     );
 
     let push_router = if args.enable_web_push {
@@ -141,4 +145,47 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     axum::serve(listener, app).await?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Args;
+    use clap::Parser;
+
+    #[test]
+    fn cli_defaults_match_release_config_defaults() {
+        let args = Args::parse_from(["signal-daemon"]);
+        assert_eq!(args.host, "127.0.0.1");
+        assert_eq!(args.port, 8791);
+        assert_eq!(args.db_path, "./signal_demo.db");
+        assert!(!args.require_token_for_read);
+        assert!(!args.enable_web_push);
+    }
+
+    #[test]
+    fn cli_parses_release_config_flags() {
+        let args = Args::parse_from([
+            "signal-daemon",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "8791",
+            "--db-path",
+            ".\\signal_demo.db",
+            "--token",
+            "dev-token",
+            "--require-token-for-read",
+            "--enable-web-push",
+            "--public-base-url",
+            "https://example.test",
+        ]);
+        assert_eq!(args.port, 8791);
+        assert_eq!(args.token.as_deref(), Some("dev-token"));
+        assert!(args.require_token_for_read);
+        assert!(args.enable_web_push);
+        assert_eq!(
+            args.public_base_url.as_deref(),
+            Some("https://example.test")
+        );
+    }
 }

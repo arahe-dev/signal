@@ -21,11 +21,19 @@ pub struct AppState {
     pub require_token_for_read: bool,
     pub enable_web_push: bool,
     pub vapid_config: Option<VapidConfig>,
+    pub db_path: String,
 }
 
 impl AppState {
     pub fn new(storage: Arc<Storage>, token: Option<String>, require_token_for_read: bool) -> Self {
-        Self::with_push(storage, token, require_token_for_read, false, None)
+        Self::with_push(
+            storage,
+            token,
+            require_token_for_read,
+            false,
+            None,
+            String::new(),
+        )
     }
 
     pub fn with_push(
@@ -34,6 +42,7 @@ impl AppState {
         require_token_for_read: bool,
         enable_web_push: bool,
         vapid_config: Option<VapidConfig>,
+        db_path: String,
     ) -> Self {
         Self {
             storage,
@@ -41,6 +50,7 @@ impl AppState {
             require_token_for_read,
             enable_web_push,
             vapid_config,
+            db_path,
         }
     }
 

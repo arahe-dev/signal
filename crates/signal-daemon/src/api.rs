@@ -72,6 +72,26 @@ pub struct AskWaitResponse {
     reason: Option<String>,
 }
 
+#[derive(Debug, Serialize)]
+pub struct DiagnosticsResponse {
+    daemon_running: bool,
+    version: String,
+    db_path: String,
+    public_base_url: Option<String>,
+    web_push_enabled: bool,
+    vapid_public_key_length: Option<usize>,
+    vapid_public_key_first_byte: Option<u8>,
+    active_devices: usize,
+    revoked_devices: usize,
+    active_subscriptions: usize,
+    revoked_or_stale_subscriptions: usize,
+    legacy_unbound_subscriptions: usize,
+    last_push_success_at: Option<String>,
+    last_push_error: Option<String>,
+    last_ask_or_reply_event: Option<String>,
+    suggested_fix: Option<String>,
+}
+
 fn make_error_response(
     status: axum::http::StatusCode,
     error: &str,
@@ -459,6 +479,85 @@ async fn revoke_device(
     }))
 }
 
+fn build_diagnostics(state: &AppState) -> DiagnosticsResponse {
+    let devices = state.storage.list_devices().unwrap_or_default();
+    let active_devices = devices.iter().filter(|device| device.is_active()).count();
+    let revoked_devices = devices.len().saturating_sub(active_devices);
+    let push_counts = state.storage.push_subscription_counts().unwrap_or_default();
+    let subscriptions = state.storage.list_push_subscriptions().unwrap_or_default();
+    let last_push_success_at = subscriptions
+        .iter()
+        .filter_map(|subscription| subscription.last_success_at)
+        .max()
+        .map(|dt| dt.to_rfc3339());
+    let last_push_error = subscriptions
+        .iter()
+        .filter_map(|subscription| subscription.last_error.clone())
+        .next();
+    let last_ask_or_reply_event = state
+        .storage
+        .list_events(25)
+        .unwrap_or_default()
+        .into_iter()
+        .find(|event| {
+            event.event_type.contains("ask")
+                || event.event_type.contains("reply")
+                || event.event_type.contains("message")
+        })
+        .map(|event| format!("{} at {}", event.event_type, event.created_at.to_rfc3339()));
+    let (vapid_public_key_length, vapid_public_key_first_byte) = state
+        .vapid_config
+        .as_ref()
+        .and_then(|config| {
+            base64::Engine::decode(
+                &base64::engine::general_purpose::URL_SAFE_NO_PAD,
+                &config.public_key,
+            )
+            .ok()
+        })
+        .map(|bytes| (Some(bytes.len()), bytes.first().copied()))
+        .unwrap_or((None, None));
+    let public_base_url = state
+        .vapid_config
+        .as_ref()
+        .and_then(|config| config.public_base_url.clone());
+    let suggested_fix = if state.enable_web_push && push_counts.active_bound == 0 {
+        Some(
+            "Pair a phone, open /app on that phone, tap Enable Notifications, then retry Test Push."
+                .to_string(),
+        )
+    } else {
+        None
+    };
+
+    DiagnosticsResponse {
+        daemon_running: true,
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        db_path: state.db_path.clone(),
+        public_base_url,
+        web_push_enabled: state.enable_web_push,
+        vapid_public_key_length,
+        vapid_public_key_first_byte,
+        active_devices,
+        revoked_devices,
+        active_subscriptions: push_counts.active_bound,
+        revoked_or_stale_subscriptions: push_counts.revoked_or_stale,
+        legacy_unbound_subscriptions: push_counts.active_legacy,
+        last_push_success_at,
+        last_push_error,
+        last_ask_or_reply_event,
+        suggested_fix,
+    }
+}
+
+async fn diagnostics(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<DiagnosticsResponse>, axum::response::Response> {
+    check_admin_auth(&state, &headers)?;
+    Ok(Json(build_diagnostics(&state)))
+}
+
 async fn reset_all_devices(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -492,6 +591,7 @@ pub fn create_api_router(
     require_token_for_read: bool,
     enable_web_push: bool,
     vapid_config: Option<VapidConfig>,
+    db_path: String,
 ) -> Router {
     let state = AppState::with_push(
         storage,
@@ -499,6 +599,7 @@ pub fn create_api_router(
         require_token_for_read,
         enable_web_push,
         vapid_config,
+        db_path,
     );
 
     Router::new()
@@ -518,6 +619,7 @@ pub fn create_api_router(
         .route("/api/devices", get(list_devices))
         .route("/api/devices/reset-all", post(reset_all_devices))
         .route("/api/devices/{id}/revoke", post(revoke_device))
+        .route("/api/diagnostics", get(diagnostics))
         .with_state(state)
 }
 
@@ -1083,6 +1185,17 @@ async fn dashboard(
     let active_devices = device_list.iter().filter(|d| d.is_active()).count();
     let revoked_devices = device_list.iter().filter(|d| !d.is_active()).count();
     let push_counts = state.storage.push_subscription_counts().unwrap_or_default();
+    let diagnostics = build_diagnostics(&state);
+    let suggested_fix_html = diagnostics
+        .suggested_fix
+        .as_ref()
+        .map(|fix| {
+            format!(
+                r#"<p class="note"><strong>Suggested fix:</strong> {}</p>"#,
+                escape_html(fix)
+            )
+        })
+        .unwrap_or_default();
 
     let devices_html = if device_list.is_empty() {
         "<p class=\"note\">No devices paired yet.</p>".to_string()
@@ -1236,6 +1349,30 @@ async fn dashboard(
         </div>
 
         <div class="card">
+            <h2>Diagnostics</h2>
+            <div class="stats">
+                <div class="stat">
+                    <div class="stat-value">{}</div>
+                    <div class="stat-label">Web Push</div>
+                </div>
+                <div class="stat">
+                    <div class="stat-value">{}</div>
+                    <div class="stat-label">VAPID Key</div>
+                </div>
+                <div class="stat">
+                    <div class="stat-value">{}</div>
+                    <div class="stat-label">Last Push Success</div>
+                </div>
+            </div>
+            <p class="note">DB: <code>{}</code></p>
+            <p class="note">Public Base URL: <code>{}</code></p>
+            <p class="note">Last Push Error: <code>{}</code></p>
+            <p class="note">Last Ask/Reply Event: <code>{}</code></p>
+            {}
+            <p class="note">JSON diagnostics: <code>/api/diagnostics</code> with <code>X-Signal-Token</code>.</p>
+        </div>
+
+        <div class="card">
             <h2>Paired Devices</h2>
             <table>
                 <thead>
@@ -1384,7 +1521,17 @@ async fn dashboard(
                     throw new Error(body.message || ('HTTP ' + response.status));
                 }}
                 const color = body.success === false ? '#c77c02' : '#2e7d32';
-                statusDiv.innerHTML = '<div style="color:' + color + ';">' + (body.message || 'Push test completed') + '</div>' +
+                let reason = '';
+                if (body.summary && body.summary.attempted === 0) {{
+                    if (body.summary.skipped_legacy > 0) {{
+                        reason = '<div style="color:#c77c02;margin-top:6px;">No active device-bound subscription. Enable notifications from the paired phone, or re-pair and enable notifications.</div>';
+                    }} else if (body.summary.skipped_revoked > 0) {{
+                        reason = '<div style="color:#c77c02;margin-top:6px;">Only revoked subscriptions were found. Pair a phone and enable notifications again.</div>';
+                    }} else {{
+                        reason = '<div style="color:#c77c02;margin-top:6px;">No active subscriptions are registered yet.</div>';
+                    }}
+                }}
+                statusDiv.innerHTML = '<div style="color:' + color + ';">' + (body.message || 'Push test completed') + '</div>' + reason +
                     '<pre style="white-space:pre-wrap;background:#f5f5f7;padding:12px;border-radius:8px;margin-top:8px;">' + JSON.stringify(body, null, 2) + '</pre>';
             }} catch (error) {{
                 statusDiv.innerHTML = '<div style="color:#c62828;">Push failed: ' + error.message + '</div>';
@@ -1512,6 +1659,33 @@ async fn dashboard(
         push_counts.active_bound,
         push_counts.revoked_or_stale,
         push_counts.active_legacy,
+        if diagnostics.web_push_enabled {
+            "on"
+        } else {
+            "off"
+        },
+        diagnostics
+            .vapid_public_key_length
+            .map(|length| format!(
+                "{}/{}",
+                length,
+                diagnostics.vapid_public_key_first_byte.unwrap_or_default()
+            ))
+            .unwrap_or_else(|| "n/a".to_string()),
+        diagnostics
+            .last_push_success_at
+            .clone()
+            .unwrap_or_else(|| "none".to_string()),
+        escape_html(&diagnostics.db_path),
+        escape_html(diagnostics.public_base_url.as_deref().unwrap_or("none")),
+        escape_html(diagnostics.last_push_error.as_deref().unwrap_or("none")),
+        escape_html(
+            diagnostics
+                .last_ask_or_reply_event
+                .as_deref()
+                .unwrap_or("none")
+        ),
+        suggested_fix_html,
         devices_html
     );
 
@@ -1734,18 +1908,119 @@ async fn pair_page(
     Ok(Html(Box::leak(html.into_boxed_str())))
 }
 
+async fn diagnostics_page(
+    State(state): State<AppState>,
+    Query(query): Query<TokenQuery>,
+) -> Result<Html<String>, axum::response::Response> {
+    if state.token.is_some() {
+        match query
+            .token
+            .as_deref()
+            .and_then(|token| state.authenticate_token(token).ok())
+        {
+            Some(AuthIdentity::Admin) => {}
+            _ => {
+                return Err(make_error_response(
+                    axum::http::StatusCode::UNAUTHORIZED,
+                    "unauthorized",
+                    "Diagnostics requires ?token=<admin-token>",
+                ));
+            }
+        }
+    }
+
+    let diagnostics = build_diagnostics(&state);
+    let suggested_fix = diagnostics.suggested_fix.as_deref().unwrap_or("none");
+    let html = format!(
+        r#"<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Signal Diagnostics</title>
+    <style>
+        body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background:#f5f5f7; color:#1d1d1f; padding:20px; }}
+        main {{ max-width: 900px; margin: 0 auto; background:white; border-radius:12px; padding:20px; box-shadow:0 1px 3px rgba(0,0,0,.1); }}
+        h1 {{ margin-bottom:16px; }}
+        table {{ width:100%; border-collapse:collapse; }}
+        td {{ border-bottom:1px solid #e5e5ea; padding:10px 0; vertical-align:top; }}
+        td:first-child {{ color:#6e6e73; width:34%; }}
+        code {{ background:#f5f5f7; padding:2px 5px; border-radius:4px; word-break:break-all; }}
+    </style>
+</head>
+<body>
+<main>
+    <h1>Signal Diagnostics</h1>
+    <table>
+        <tr><td>Daemon running</td><td>{}</td></tr>
+        <tr><td>Version</td><td>{}</td></tr>
+        <tr><td>DB path</td><td><code>{}</code></td></tr>
+        <tr><td>Public base URL</td><td><code>{}</code></td></tr>
+        <tr><td>Web Push enabled</td><td>{}</td></tr>
+        <tr><td>VAPID public key</td><td>length={:?}, firstByte={:?}</td></tr>
+        <tr><td>Devices</td><td>active={}, revoked={}</td></tr>
+        <tr><td>Subscriptions</td><td>active={}, revoked/stale={}, legacy/unbound={}</td></tr>
+        <tr><td>Last push success</td><td>{}</td></tr>
+        <tr><td>Last push error</td><td>{}</td></tr>
+        <tr><td>Last ask/reply event</td><td>{}</td></tr>
+        <tr><td>Suggested fix</td><td>{}</td></tr>
+    </table>
+</main>
+</body>
+</html>"#,
+        diagnostics.daemon_running,
+        escape_html(&diagnostics.version),
+        escape_html(&diagnostics.db_path),
+        escape_html(diagnostics.public_base_url.as_deref().unwrap_or("none")),
+        diagnostics.web_push_enabled,
+        diagnostics.vapid_public_key_length,
+        diagnostics.vapid_public_key_first_byte,
+        diagnostics.active_devices,
+        diagnostics.revoked_devices,
+        diagnostics.active_subscriptions,
+        diagnostics.revoked_or_stale_subscriptions,
+        diagnostics.legacy_unbound_subscriptions,
+        escape_html(
+            diagnostics
+                .last_push_success_at
+                .as_deref()
+                .unwrap_or("none")
+        ),
+        escape_html(diagnostics.last_push_error.as_deref().unwrap_or("none")),
+        escape_html(
+            diagnostics
+                .last_ask_or_reply_event
+                .as_deref()
+                .unwrap_or("none")
+        ),
+        escape_html(suggested_fix),
+    );
+    Ok(Html(html))
+}
+
 pub fn create_html_router(
     storage: Arc<Storage>,
     token: Option<String>,
     require_token_for_read: bool,
+    enable_web_push: bool,
+    vapid_config: Option<VapidConfig>,
+    db_path: String,
 ) -> Router {
     Router::new()
         .route("/", get(inbox_page))
         .route("/dashboard", get(dashboard))
+        .route("/diagnostics", get(diagnostics_page))
         .route("/pair", get(pair_page))
         .route("/message/{id}", get(message_detail_page))
         .route("/api/messages/{id}/replies/form", post(reply_form_handler))
-        .with_state(AppState::new(storage, token, require_token_for_read))
+        .with_state(AppState::with_push(
+            storage,
+            token,
+            require_token_for_read,
+            enable_web_push,
+            vapid_config,
+            db_path,
+        ))
 }
 
 #[derive(Debug, Deserialize)]
@@ -1977,4 +2252,80 @@ async fn pwa_icon_512() -> impl IntoResponse {
         ],
         bytes,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::build_diagnostics;
+    use crate::app_state::AppState;
+    use crate::web_push_sender::VapidConfig;
+    use signal_core::models::{Device, PushSubscription};
+    use signal_core::{hash_token, Storage};
+    use std::sync::Arc;
+    use tempfile::NamedTempFile;
+
+    #[test]
+    fn diagnostics_summary_counts_devices_and_push_state() {
+        let file = NamedTempFile::new().unwrap();
+        let storage = Arc::new(Storage::new(file.path()).unwrap());
+        let active = Device::new(
+            "active".to_string(),
+            "phone".to_string(),
+            "phone".to_string(),
+            hash_token("active-token"),
+            "sig_dev_active".to_string(),
+        );
+        let revoked = Device::new(
+            "revoked".to_string(),
+            "old phone".to_string(),
+            "phone".to_string(),
+            hash_token("revoked-token"),
+            "sig_dev_revoked".to_string(),
+        );
+        storage.create_device(&active).unwrap();
+        storage.create_device(&revoked).unwrap();
+        storage.revoke_device(&revoked.id).unwrap();
+
+        let mut active_sub = PushSubscription::new(
+            "https://web.push.apple.com/active".to_string(),
+            "p256dh".to_string(),
+            "auth".to_string(),
+            None,
+        );
+        active_sub.device_id = Some(active.id.clone());
+        storage.upsert_push_subscription(&active_sub).unwrap();
+
+        let legacy_sub = PushSubscription::new(
+            "https://web.push.apple.com/legacy".to_string(),
+            "p256dh".to_string(),
+            "auth".to_string(),
+            None,
+        );
+        storage.upsert_push_subscription(&legacy_sub).unwrap();
+
+        let state = AppState::with_push(
+            storage,
+            Some("dev-token".to_string()),
+            true,
+            true,
+            Some(VapidConfig {
+                private_key: "private".to_string(),
+                public_key: "invalid".to_string(),
+                subject: "mailto:test@example.local".to_string(),
+                public_base_url: Some("https://example.test".to_string()),
+            }),
+            ".\\test.db".to_string(),
+        );
+
+        let diagnostics = build_diagnostics(&state);
+        assert!(diagnostics.daemon_running);
+        assert_eq!(diagnostics.active_devices, 1);
+        assert_eq!(diagnostics.revoked_devices, 1);
+        assert_eq!(diagnostics.active_subscriptions, 1);
+        assert_eq!(diagnostics.legacy_unbound_subscriptions, 1);
+        assert_eq!(
+            diagnostics.public_base_url.as_deref(),
+            Some("https://example.test")
+        );
+    }
 }
