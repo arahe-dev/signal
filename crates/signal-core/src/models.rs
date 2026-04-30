@@ -377,3 +377,82 @@ impl PushSubscription {
         }
     }
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Device {
+    pub id: String,
+    pub name: String,
+    pub kind: String, // pc, phone, cli, agent, unknown
+    pub token_hash: String,
+    pub token_prefix: String,
+    pub paired_at: DateTime<Utc>,
+    pub last_seen_at: Option<DateTime<Utc>>,
+    pub revoked_at: Option<DateTime<Utc>>,
+    pub user_agent: Option<String>,
+    pub metadata_json: Option<String>,
+}
+
+impl Device {
+    pub fn new(
+        id: String,
+        name: String,
+        kind: String,
+        token_hash: String,
+        token_prefix: String,
+    ) -> Self {
+        Self {
+            id,
+            name,
+            kind,
+            token_hash,
+            token_prefix,
+            paired_at: Utc::now(),
+            last_seen_at: None,
+            revoked_at: None,
+            user_agent: None,
+            metadata_json: None,
+        }
+    }
+
+    pub fn is_active(&self) -> bool {
+        self.revoked_at.is_none()
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PairingCode {
+    pub code_hash: String,
+    pub code_prefix: String,
+    pub created_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+    pub used_at: Option<DateTime<Utc>>,
+    pub device_name_hint: Option<String>,
+    pub metadata_json: Option<String>,
+}
+
+impl PairingCode {
+    pub fn new(code_hash: String, code_prefix: String, ttl_seconds: u64) -> Self {
+        let now = Utc::now();
+        Self {
+            code_hash,
+            code_prefix,
+            created_at: now,
+            expires_at: now + chrono::Duration::seconds(ttl_seconds as i64),
+            used_at: None,
+            device_name_hint: None,
+            metadata_json: None,
+        }
+    }
+
+    pub fn is_expired(&self) -> bool {
+        Utc::now() > self.expires_at
+    }
+
+    pub fn is_used(&self) -> bool {
+        self.used_at.is_some()
+    }
+
+    pub fn is_valid(&self) -> bool {
+        !self.is_expired() && !self.is_used()
+    }
+}

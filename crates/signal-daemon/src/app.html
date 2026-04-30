@@ -166,14 +166,44 @@
     </div>
 
     <script>
-        const urlParams = new URLSearchParams(window.location.search);
-        const token = urlParams.get('token');
+        // Get token from localStorage first, then URL parameter, then use empty string
+        let token = localStorage.getItem('signal_token') || new URLSearchParams(window.location.search).get('token') || '';
+        
+        // If token came from URL parameter, save it to localStorage
+        if (new URLSearchParams(window.location.search).get('token') && !localStorage.getItem('signal_token')) {
+            localStorage.setItem('signal_token', token);
+            // Clean up URL parameter
+            window.history.replaceState({}, document.title, window.location.pathname);
+        }
 
         const enableBtn = document.getElementById('enable-notifications');
         const statusDiv = document.getElementById('notification-status');
         const messageList = document.getElementById('message-list');
         const pushStatus = document.getElementById('push-status');
         document.getElementById('refresh-inbox').addEventListener('click', loadInbox);
+
+        // Add device management UI (placeholder for Phase B)
+        function addDeviceManagementUI() {
+            if (!token) {
+                // Show pairing UI if no token
+                const pairingCard = document.createElement('div');
+                pairingCard.className = 'card';
+                pairingCard.innerHTML = `
+                    <h2>Device Pairing</h2>
+                    <p>No device token found. Pair this device to send messages.</p>
+                    <button id="pair-device" class="btn">Start Pairing</button>
+                    <div id="pairing-status"></div>
+                `;
+                document.querySelector('.container').insertBefore(pairingCard, document.querySelector('#notification-card'));
+                
+                document.getElementById('pair-device')?.addEventListener('click', startPairing);
+            }
+        }
+
+        async function startPairing() {
+            // Placeholder - will be implemented in Phase B with QR code generation
+            console.log('Pairing started');
+        }
 
         enableBtn.addEventListener('click', async () => {
             if (!('Notification' in window)) {
@@ -351,6 +381,8 @@
                 .replace(/'/g, '&#039;');
         }
 
+        // Initialize UI
+        addDeviceManagementUI();
         loadInbox();
     </script>
 </body>

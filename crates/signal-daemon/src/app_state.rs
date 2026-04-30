@@ -33,10 +33,32 @@ impl AppState {
     }
 
     pub fn check_token(&self, token: &str) -> bool {
-        match &self.token {
-            Some(expected) => token == expected,
-            None => true,
+        // If no admin token is required, accept any valid device token
+        if self.token.is_none() {
+            return self.check_device_token(token);
         }
+
+        // Check against hardcoded admin token first
+        if let Some(expected) = &self.token {
+            if token == expected {
+                return true;
+            }
+        }
+
+        // Check against device tokens as fallback
+        self.check_device_token(token)
+    }
+
+    pub fn check_device_token(&self, token: &str) -> bool {
+        // Check against device tokens
+        if let Ok(device) = self
+            .storage
+            .get_device_by_token_hash(&signal_core::hash_token(token))
+        {
+            // Device must be active (not revoked)
+            return device.is_active();
+        }
+        false
     }
 
     pub fn is_auth_required(&self) -> bool {

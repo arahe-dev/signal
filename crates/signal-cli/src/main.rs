@@ -100,6 +100,31 @@ enum Commands {
         #[arg(long, default_value = "cli")]
         source: String,
     },
+    Pair {
+        #[command(subcommand)]
+        subcommand: PairSubcommand,
+    },
+    Devices {
+        #[command(subcommand)]
+        subcommand: DevicesSubcommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum PairSubcommand {
+    Start {
+        #[arg(long)]
+        name: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum DevicesSubcommand {
+    List,
+    Revoke {
+        #[arg(long)]
+        id: String,
+    },
 }
 
 #[derive(Debug, Serialize)]
@@ -193,6 +218,36 @@ struct AskOutput {
     message_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     reason: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PairStartResponse {
+    pairing_code: String,
+    qr_data: String,
+    expires_in_seconds: u64,
+}
+
+#[derive(Debug, Deserialize)]
+struct DeviceInfo {
+    id: String,
+    name: String,
+    kind: String,
+    token_prefix: String,
+    paired_at: String,
+    last_seen_at: Option<String>,
+    revoked_at: Option<String>,
+    is_active: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct DeviceListResponse {
+    devices: Vec<DeviceInfo>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DeviceRevokeResponse {
+    success: bool,
+    message: String,
 }
 
 struct ApiClient {
@@ -336,6 +391,37 @@ impl ApiClient {
             .send()
             .await?;
         parse_response(response, "create reply").await
+    }
+
+    async fn pair_start(
+        &self,
+        device_name: String,
+    ) -> Result<PairStartResponse, Box<dyn std::error::Error>> {
+        let url = format!("{}/api/pair/start", self.base_url);
+        let response = self
+            .add_auth(self.client.post(&url))
+            .json(&serde_json::json!({
+                "device_name": device_name
+            }))
+            .send()
+            .await?;
+        parse_response(response, "pair start").await
+    }
+
+    async fn list_devices(&self) -> Result<Vec<DeviceInfo>, Box<dyn std::error::Error>> {
+        let url = format!("{}/api/devices", self.base_url);
+        let response = self.add_auth(self.client.get(&url)).send().await?;
+        let device_list: DeviceListResponse = parse_response(response, "list devices").await?;
+        Ok(device_list.devices)
+    }
+
+    async fn revoke_device(
+        &self,
+        device_id: String,
+    ) -> Result<DeviceRevokeResponse, Box<dyn std::error::Error>> {
+        let url = format!("{}/api/devices/{}/revoke", self.base_url, device_id);
+        let response = self.add_auth(self.client.post(&url)).send().await?;
+        parse_response(response, "revoke device").await
     }
 }
 
@@ -529,6 +615,47 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("Reply created: {}", reply.id);
             println!("Status: {}", reply.status);
         }
+        Commands::Pair { subcommand } => match subcommand {
+            PairSubcommand::Start { name } => {
+                let response = client.pair_start(name).await?;
+                println!("Pairing code generated: {}", response.pairing_code);
+                println!("QR Data: {}", response.qr_data);
+                println!("Expires in: {} seconds", response.expires_in_seconds);
+            }
+        },
+        Commands::Devices { subcommand } => match subcommand {
+            DevicesSubcommand::List => {
+                let devices = client.list_devices().await?;
+                if devices.is_empty() {
+                    println!("No paired devices.");
+                } else {
+                    println!("Paired devices:\n");
+                    for device in &devices {
+                        println!("ID: {}", device.id);
+                        println!("Name: {}", device.name);
+                        println!("Type: {}", device.kind);
+                        println!("Token: {}", device.token_prefix);
+                        println!(
+                            "Status: {}",
+                            if device.is_active {
+                                "active"
+                            } else {
+                                "revoked"
+                            }
+                        );
+                        println!("Paired: {}", device.paired_at);
+                        if let Some(seen) = &device.last_seen_at {
+                            println!("Last seen: {}", seen);
+                        }
+                        println!();
+                    }
+                }
+            }
+            DevicesSubcommand::Revoke { id } => {
+                let response = client.revoke_device(id).await?;
+                println!("Device revoked: {}", response.message);
+            }
+        },
     }
 
     Ok(())
