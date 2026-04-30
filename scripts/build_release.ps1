@@ -32,9 +32,7 @@ Copy-Item -LiteralPath (Join-Path $repoRoot "target\release\signal-daemon.exe") 
 Copy-Item -LiteralPath (Join-Path $repoRoot "target\release\signal-cli.exe") -Destination $distSignal
 Copy-Item -LiteralPath (Join-Path $repoRoot "README.md") -Destination $distSignal
 Copy-Item -LiteralPath (Join-Path $repoRoot "signal.config.example.json") -Destination $distSignal
-Copy-Item -LiteralPath (Join-Path $repoRoot "docs\PHASE_B_MANUAL_TEST.md") -Destination (Join-Path $distSignal "docs")
-Copy-Item -LiteralPath (Join-Path $repoRoot "docs\PHASE_C_RELEASE_CHECKLIST.md") -Destination (Join-Path $distSignal "docs")
-Copy-Item -LiteralPath (Join-Path $repoRoot "docs\PHASE_D_DOCTOR.md") -Destination (Join-Path $distSignal "docs")
+Copy-Item -LiteralPath (Join-Path $repoRoot "docs\*.md") -Destination (Join-Path $distSignal "docs")
 Copy-Item -LiteralPath (Join-Path $repoRoot "scripts\start_release.ps1") -Destination (Join-Path $distSignal "scripts")
 
 Write-Host ""
