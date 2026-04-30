@@ -2,4 +2,6 @@ target/
 *.db
 signal_vapid.json
 signal_vapid*.json
+signal.config.json
 *.pdb
+*.png~

@@ -110,6 +110,35 @@ impl Storage {
             [],
         )?;
 
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS devices (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                token_hash TEXT NOT NULL,
+                token_prefix TEXT NOT NULL,
+                paired_at TEXT NOT NULL,
+                last_seen_at TEXT,
+                revoked_at TEXT,
+                user_agent TEXT,
+                metadata_json TEXT
+            )",
+            [],
+        )?;
+
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS pairing_codes (
+                code_hash TEXT PRIMARY KEY,
+                code_prefix TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
+                used_at TEXT,
+                device_name_hint TEXT,
+                metadata_json TEXT
+            )",
+            [],
+        )?;
+
         let _ = conn.execute(
             "ALTER TABLE push_subscriptions ADD COLUMN vapid_public_key_hash TEXT",
             [],
@@ -643,6 +672,233 @@ impl Storage {
         conn.execute(
             "UPDATE push_subscriptions SET last_success_at = ?1, last_error = NULL WHERE id = ?2",
             params![now, id],
+        )?;
+        Ok(())
+    }
+
+    // Device methods
+    pub fn create_device(&self, device: &crate::models::Device) -> Result<(), StorageError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO devices (id, name, kind, token_hash, token_prefix, paired_at, last_seen_at, revoked_at, user_agent, metadata_json)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            params![
+                device.id,
+                device.name,
+                device.kind,
+                device.token_hash,
+                device.token_prefix,
+                device.paired_at.to_rfc3339(),
+                device.last_seen_at.map(|dt| dt.to_rfc3339()),
+                device.revoked_at.map(|dt| dt.to_rfc3339()),
+                device.user_agent,
+                device.metadata_json,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_device(&self, id: &str) -> Result<crate::models::Device, StorageError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, name, kind, token_hash, token_prefix, paired_at, last_seen_at, revoked_at, user_agent, metadata_json
+             FROM devices WHERE id = ?1",
+        )?;
+
+        let device = stmt
+            .query_row(params![id], |row| {
+                Ok(crate::models::Device {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                    kind: row.get(2)?,
+                    token_hash: row.get(3)?,
+                    token_prefix: row.get(4)?,
+                    paired_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(5)?)
+                        .map(|dt| dt.with_timezone(&chrono::Utc))
+                        .unwrap_or_else(|_| chrono::Utc::now()),
+                    last_seen_at: row.get::<_, Option<String>>(6)?.and_then(|s| {
+                        chrono::DateTime::parse_from_rfc3339(&s)
+                            .map(|dt| dt.with_timezone(&chrono::Utc))
+                            .ok()
+                    }),
+                    revoked_at: row.get::<_, Option<String>>(7)?.and_then(|s| {
+                        chrono::DateTime::parse_from_rfc3339(&s)
+                            .map(|dt| dt.with_timezone(&chrono::Utc))
+                            .ok()
+                    }),
+                    user_agent: row.get(8)?,
+                    metadata_json: row.get(9)?,
+                })
+            })
+            .map_err(|_| StorageError::NotFound(format!("Device not found: {}", id)))?;
+
+        Ok(device)
+    }
+
+    pub fn get_device_by_token_hash(
+        &self,
+        token_hash: &str,
+    ) -> Result<crate::models::Device, StorageError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, name, kind, token_hash, token_prefix, paired_at, last_seen_at, revoked_at, user_agent, metadata_json
+             FROM devices WHERE token_hash = ?1",
+        )?;
+
+        let device = stmt
+            .query_row(params![token_hash], |row| {
+                Ok(crate::models::Device {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                    kind: row.get(2)?,
+                    token_hash: row.get(3)?,
+                    token_prefix: row.get(4)?,
+                    paired_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(5)?)
+                        .map(|dt| dt.with_timezone(&chrono::Utc))
+                        .unwrap_or_else(|_| chrono::Utc::now()),
+                    last_seen_at: row.get::<_, Option<String>>(6)?.and_then(|s| {
+                        chrono::DateTime::parse_from_rfc3339(&s)
+                            .map(|dt| dt.with_timezone(&chrono::Utc))
+                            .ok()
+                    }),
+                    revoked_at: row.get::<_, Option<String>>(7)?.and_then(|s| {
+                        chrono::DateTime::parse_from_rfc3339(&s)
+                            .map(|dt| dt.with_timezone(&chrono::Utc))
+                            .ok()
+                    }),
+                    user_agent: row.get(8)?,
+                    metadata_json: row.get(9)?,
+                })
+            })
+            .map_err(|_| {
+                StorageError::NotFound(format!("Device not found with token hash: {}", token_hash))
+            })?;
+
+        Ok(device)
+    }
+
+    pub fn list_devices(&self) -> Result<Vec<crate::models::Device>, StorageError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, name, kind, token_hash, token_prefix, paired_at, last_seen_at, revoked_at, user_agent, metadata_json
+             FROM devices ORDER BY paired_at DESC",
+        )?;
+
+        let devices = stmt
+            .query_map([], |row| {
+                Ok(crate::models::Device {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                    kind: row.get(2)?,
+                    token_hash: row.get(3)?,
+                    token_prefix: row.get(4)?,
+                    paired_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(5)?)
+                        .map(|dt| dt.with_timezone(&chrono::Utc))
+                        .unwrap_or_else(|_| chrono::Utc::now()),
+                    last_seen_at: row.get::<_, Option<String>>(6)?.and_then(|s| {
+                        chrono::DateTime::parse_from_rfc3339(&s)
+                            .map(|dt| dt.with_timezone(&chrono::Utc))
+                            .ok()
+                    }),
+                    revoked_at: row.get::<_, Option<String>>(7)?.and_then(|s| {
+                        chrono::DateTime::parse_from_rfc3339(&s)
+                            .map(|dt| dt.with_timezone(&chrono::Utc))
+                            .ok()
+                    }),
+                    user_agent: row.get(8)?,
+                    metadata_json: row.get(9)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(devices)
+    }
+
+    pub fn update_device_last_seen(&self, id: &str) -> Result<(), StorageError> {
+        let conn = self.conn.lock().unwrap();
+        let now = chrono::Utc::now().to_rfc3339();
+        conn.execute(
+            "UPDATE devices SET last_seen_at = ?1 WHERE id = ?2",
+            params![now, id],
+        )?;
+        Ok(())
+    }
+
+    pub fn revoke_device(&self, id: &str) -> Result<(), StorageError> {
+        let conn = self.conn.lock().unwrap();
+        let now = chrono::Utc::now().to_rfc3339();
+        conn.execute(
+            "UPDATE devices SET revoked_at = ?1 WHERE id = ?2",
+            params![now, id],
+        )?;
+        Ok(())
+    }
+
+    // Pairing code methods
+    pub fn create_pairing_code(
+        &self,
+        code: &crate::models::PairingCode,
+    ) -> Result<(), StorageError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO pairing_codes (code_hash, code_prefix, created_at, expires_at, used_at, device_name_hint, metadata_json)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                code.code_hash,
+                code.code_prefix,
+                code.created_at.to_rfc3339(),
+                code.expires_at.to_rfc3339(),
+                code.used_at.map(|dt| dt.to_rfc3339()),
+                code.device_name_hint,
+                code.metadata_json,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_pairing_code(
+        &self,
+        code_hash: &str,
+    ) -> Result<crate::models::PairingCode, StorageError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT code_hash, code_prefix, created_at, expires_at, used_at, device_name_hint, metadata_json
+             FROM pairing_codes WHERE code_hash = ?1",
+        )?;
+
+        let code = stmt
+            .query_row(params![code_hash], |row| {
+                Ok(crate::models::PairingCode {
+                    code_hash: row.get(0)?,
+                    code_prefix: row.get(1)?,
+                    created_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(2)?)
+                        .map(|dt| dt.with_timezone(&chrono::Utc))
+                        .unwrap_or_else(|_| chrono::Utc::now()),
+                    expires_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(3)?)
+                        .map(|dt| dt.with_timezone(&chrono::Utc))
+                        .unwrap_or_else(|_| chrono::Utc::now()),
+                    used_at: row.get::<_, Option<String>>(4)?.and_then(|s| {
+                        chrono::DateTime::parse_from_rfc3339(&s)
+                            .map(|dt| dt.with_timezone(&chrono::Utc))
+                            .ok()
+                    }),
+                    device_name_hint: row.get(5)?,
+                    metadata_json: row.get(6)?,
+                })
+            })
+            .map_err(|_| {
+                StorageError::NotFound(format!("Pairing code not found: {}", code_hash))
+            })?;
+
+        Ok(code)
+    }
+
+    pub fn mark_pairing_code_used(&self, code_hash: &str) -> Result<(), StorageError> {
+        let conn = self.conn.lock().unwrap();
+        let now = chrono::Utc::now().to_rfc3339();
+        conn.execute(
+            "UPDATE pairing_codes SET used_at = ?1 WHERE code_hash = ?2",
+            params![now, code_hash],
         )?;
         Ok(())
     }

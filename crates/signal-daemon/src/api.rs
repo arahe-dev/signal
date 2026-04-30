@@ -22,6 +22,7 @@ use signal_core::{
 use std::sync::Arc;
 use tokio::time::{sleep, Duration, Instant};
 use tracing::info;
+use uuid::Uuid;
 
 #[derive(Debug, Deserialize)]
 pub struct ListMessagesQuery {
@@ -128,6 +129,239 @@ fn check_read_auth(state: &AppState, headers: &HeaderMap) -> Result<(), axum::re
     }
 }
 
+// Pairing request/response types
+#[derive(Debug, Deserialize)]
+pub struct PairStartRequest {
+    pub device_name: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PairStartResponse {
+    pub pairing_code: String,
+    pub qr_data: String,
+    pub expires_in_seconds: u64,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PairCompleteRequest {
+    pub pairing_code: String,
+    pub device_name: String,
+    pub device_kind: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PairCompleteResponse {
+    pub device_id: String,
+    pub device_token: String,
+    pub device_name: String,
+}
+
+// Pairing handlers
+async fn pair_start(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    axum::extract::Json(payload): axum::extract::Json<PairStartRequest>,
+) -> Result<Json<PairStartResponse>, axum::response::Response> {
+    check_auth(&state, &headers)?;
+
+    // Generate a random pairing code using token generation
+    let pairing_token = signal_core::generate_device_token();
+    let code_hash = signal_core::hash_token(&pairing_token);
+    let code_prefix = signal_core::get_token_prefix(&pairing_token);
+
+    let pairing_code = signal_core::models::PairingCode::new(
+        code_hash.clone(),
+        code_prefix.clone(),
+        300, // 5 minutes
+    );
+
+    state
+        .storage
+        .create_pairing_code(&pairing_code)
+        .map_err(|e| {
+            make_error_response(
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                "pairing_failed",
+                &format!("Failed to create pairing code: {}", e),
+            )
+        })?;
+
+    // Generate QR data - for now just the pairing code
+    // In production this could be a full URL or QR format
+    let qr_data = format!("signal://pair/{}", code_prefix);
+
+    info!("Pairing code generated for device: {}", payload.device_name);
+
+    Ok(Json(PairStartResponse {
+        pairing_code: code_prefix,
+        qr_data,
+        expires_in_seconds: 300,
+    }))
+}
+
+async fn pair_complete(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    axum::extract::Json(payload): axum::extract::Json<PairCompleteRequest>,
+) -> Result<Json<PairCompleteResponse>, axum::response::Response> {
+    // Get pairing code
+    let pairing_code = state
+        .storage
+        .get_pairing_code(&signal_core::auth::hash_token(&payload.pairing_code))
+        .map_err(|_| {
+            make_error_response(
+                axum::http::StatusCode::BAD_REQUEST,
+                "invalid_pairing_code",
+                "Pairing code not found or expired",
+            )
+        })?;
+
+    // Check if pairing code is valid (not expired, not used)
+    if !pairing_code.is_valid() {
+        return Err(make_error_response(
+            axum::http::StatusCode::BAD_REQUEST,
+            "pairing_code_expired",
+            "Pairing code has expired or already been used",
+        ));
+    }
+
+    // Generate device token
+    let device_token = signal_core::generate_device_token();
+    let token_hash = signal_core::hash_token(&device_token);
+    let token_prefix = signal_core::get_token_prefix(&device_token);
+
+    // Create device
+    let device_name = payload.device_name.clone();
+    let device = signal_core::models::Device {
+        id: Uuid::new_v4().to_string(),
+        name: payload.device_name,
+        kind: payload.device_kind,
+        token_hash,
+        token_prefix: token_prefix.clone(),
+        paired_at: Utc::now(),
+        last_seen_at: None,
+        revoked_at: None,
+        user_agent: headers
+            .get("user-agent")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string()),
+        metadata_json: None,
+    };
+
+    let device_id = device.id.clone();
+    state.storage.create_device(&device).map_err(|e| {
+        make_error_response(
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            "device_creation_failed",
+            &format!("Failed to create device: {}", e),
+        )
+    })?;
+
+    // Mark pairing code as used
+    state
+        .storage
+        .mark_pairing_code_used(&pairing_code.code_hash)
+        .map_err(|e| {
+            make_error_response(
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                "pairing_failed",
+                &format!("Failed to mark pairing code as used: {}", e),
+            )
+        })?;
+
+    info!("Device paired: {} ({})", device_id, device_name);
+
+    Ok(Json(PairCompleteResponse {
+        device_id,
+        device_token,
+        device_name: device.name,
+    }))
+}
+
+// Device list/revoke response types
+#[derive(Debug, Serialize)]
+pub struct DeviceListResponse {
+    pub devices: Vec<DeviceInfo>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DeviceInfo {
+    pub id: String,
+    pub name: String,
+    pub kind: String,
+    pub token_prefix: String,
+    pub paired_at: String,
+    pub last_seen_at: Option<String>,
+    pub revoked_at: Option<String>,
+    pub is_active: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DeviceRevokeResponse {
+    pub success: bool,
+    pub message: String,
+}
+
+// Device handlers
+async fn list_devices(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<DeviceListResponse>, axum::response::Response> {
+    check_auth(&state, &headers)?;
+
+    let devices = state.storage.list_devices().map_err(|e| {
+        make_error_response(
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            "list_failed",
+            &format!("Failed to list devices: {}", e),
+        )
+    })?;
+
+    let device_infos = devices
+        .into_iter()
+        .map(|d| {
+            let is_active = d.is_active();
+            DeviceInfo {
+                id: d.id,
+                name: d.name,
+                kind: d.kind,
+                token_prefix: d.token_prefix,
+                paired_at: d.paired_at.to_rfc3339(),
+                last_seen_at: d.last_seen_at.map(|dt| dt.to_rfc3339()),
+                revoked_at: d.revoked_at.map(|dt| dt.to_rfc3339()),
+                is_active,
+            }
+        })
+        .collect();
+
+    Ok(Json(DeviceListResponse {
+        devices: device_infos,
+    }))
+}
+
+async fn revoke_device(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(device_id): Path<String>,
+) -> Result<Json<DeviceRevokeResponse>, axum::response::Response> {
+    check_auth(&state, &headers)?;
+
+    state.storage.revoke_device(&device_id).map_err(|e| {
+        make_error_response(
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            "revoke_failed",
+            &format!("Failed to revoke device: {}", e),
+        )
+    })?;
+
+    info!("Device revoked: {}", device_id);
+
+    Ok(Json(DeviceRevokeResponse {
+        success: true,
+        message: format!("Device {} revoked", device_id),
+    }))
+}
+
 pub fn create_api_router(
     storage: Arc<Storage>,
     token: Option<String>,
@@ -155,6 +389,10 @@ pub fn create_api_router(
         )
         .route("/api/replies/latest", get(get_latest_reply))
         .route("/api/replies/{id}/consume", post(consume_reply))
+        .route("/api/pair/start", post(pair_start))
+        .route("/api/pair/complete", post(pair_complete))
+        .route("/api/devices", get(list_devices))
+        .route("/api/devices/{id}/revoke", post(revoke_device))
         .with_state(state)
 }
 
@@ -679,6 +917,344 @@ async fn consume_reply(
     Ok(Json(updated_reply))
 }
 
+fn escape_html(s: &str) -> String {
+    s.replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace("\"", "&quot;")
+        .replace("'", "&#39;")
+}
+
+// Dashboard handler
+async fn dashboard(
+    State(state): State<AppState>,
+    Query(query): Query<TokenQuery>,
+) -> Result<Html<String>, axum::response::Response> {
+    check_html_read_auth(&state, query.token.as_deref())?;
+
+    let device_list = state.storage.list_devices().unwrap_or_default();
+    let active_devices = device_list.iter().filter(|d| d.is_active()).count();
+    let revoked_devices = device_list.iter().filter(|d| !d.is_active()).count();
+
+    let devices_html = if device_list.is_empty() {
+        "<p class=\"note\">No devices paired yet.</p>".to_string()
+    } else {
+        device_list
+            .iter()
+            .map(|d| {
+                format!(
+                    r#"<tr style="border-bottom:1px solid #e5e5ea;">
+                    <td style="padding:12px 0;"><strong>{}</strong></td>
+                    <td style="color:#6e6e73;font-size:13px;">{}</td>
+                    <td style="color:#6e6e73;font-size:13px;">{}</td>
+                    <td style="text-align:right;">{}</td>
+                    <td style="text-align:right;">{}</td>
+                    </tr>"#,
+                    escape_html(&d.name),
+                    d.token_prefix,
+                    escape_html(&d.kind),
+                    if d.is_active() {
+                        "<span style=\"color:green;\">active</span>"
+                    } else {
+                        "<span style=\"color:red;\">revoked</span>"
+                    },
+                    if d.is_active() {
+                        format!(
+                            r#"<button onclick="revokeDevice('{}')">Revoke</button>"#,
+                            d.id
+                        )
+                    } else {
+                        String::new()
+                    }
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("")
+    };
+
+    let html = format!(
+        r#"<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Signal - Dashboard</title>
+    <style>
+        * {{
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }}
+        body {{
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #f5f5f7;
+            color: #1d1d1f;
+            padding: 20px;
+        }}
+        .container {{
+            max-width: 900px;
+            margin: 0 auto;
+        }}
+        h1 {{
+            font-size: 28px;
+            margin-bottom: 24px;
+        }}
+        .card {{
+            background: white;
+            border-radius: 12px;
+            padding: 20px;
+            margin-bottom: 16px;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+        }}
+        .stats {{
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 16px;
+            margin-bottom: 16px;
+        }}
+        .stat {{
+            background: #f5f5f7;
+            padding: 16px;
+            border-radius: 10px;
+            text-align: center;
+        }}
+        .stat-value {{
+            font-size: 32px;
+            font-weight: 600;
+            color: #007aff;
+        }}
+        .stat-label {{
+            font-size: 13px;
+            color: #6e6e73;
+            margin-top: 8px;
+        }}
+        table {{
+            width: 100%;
+            border-collapse: collapse;
+        }}
+        th {{
+            text-align: left;
+            padding: 12px 0;
+            font-weight: 600;
+            border-bottom: 2px solid #e5e5ea;
+        }}
+        .btn {{
+            padding: 8px 16px;
+            background: #007aff;
+            color: white;
+            border: none;
+            border-radius: 8px;
+            font-size: 13px;
+            cursor: pointer;
+        }}
+        .btn:hover {{
+            background: #0051d5;
+        }}
+        .note {{
+            font-size: 13px;
+            color: #86868b;
+            margin-top: 16px;
+        }}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Signal Dashboard</h1>
+        
+        <div class="card">
+            <h2>Status</h2>
+            <div class="stats">
+                <div class="stat">
+                    <div class="stat-value">{}</div>
+                    <div class="stat-label">Active Devices</div>
+                </div>
+                <div class="stat">
+                    <div class="stat-value">{}</div>
+                    <div class="stat-label">Revoked Devices</div>
+                </div>
+            </div>
+        </div>
+
+        <div class="card">
+            <h2>Paired Devices</h2>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Name</th>
+                        <th>Token</th>
+                        <th>Type</th>
+                        <th>Status</th>
+                        <th>Action</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {}
+                </tbody>
+            </table>
+            <p class="note">Revoke a device to prevent it from accessing messages.</p>
+        </div>
+
+        <div class="card">
+            <h2>Pairing</h2>
+            <p>Add a new device to Signal. Each device gets a unique token.</p>
+            <div style="margin-top: 16px;">
+                <input type="text" id="device-name-input" placeholder="Device name (e.g., iPhone, iPad)" style="padding: 8px; border: 1px solid #e5e5ea; border-radius: 8px; width: 100%; margin-bottom: 12px; font-size: 14px;">
+                <button id="start-pairing-btn" class="btn" style="margin-top: 0;">Start Pairing</button>
+            </div>
+            <div id="pairing-status" style="margin-top: 16px;"></div>
+        </div>
+    </div>
+
+    <script>
+        // Initialize token from URL and localStorage
+        function initializeToken() {{
+            const params = new URLSearchParams(window.location.search);
+            const urlToken = params.get('token');
+            if (urlToken) {{
+                localStorage.setItem('signal_admin_token', urlToken);
+            }}
+        }}
+
+        function getToken() {{
+            const params = new URLSearchParams(window.location.search);
+            return params.get('token') || localStorage.getItem('signal_admin_token') || '';
+        }}
+
+        // Device revocation
+        async function revokeDevice(deviceId) {{
+            if (!confirm('Are you sure you want to revoke this device?')) {{
+                return;
+            }}
+            
+            try {{
+                const response = await fetch(`/api/devices/${{deviceId}}/revoke`, {{
+                    method: 'POST',
+                    headers: {{
+                        'X-Signal-Token': getToken()
+                    }}
+                }});
+                
+                if (response.ok) {{
+                    alert('Device revoked successfully');
+                    location.reload();
+                }} else {{
+                    alert('Failed to revoke device');
+                }}
+            }} catch (error) {{
+                alert('Error: ' + error.message);
+            }}
+        }}
+
+        // Pairing functionality
+        document.getElementById('start-pairing-btn')?.addEventListener('click', startPairing);
+
+        async function startPairing() {{
+            const deviceNameInput = document.getElementById('device-name-input');
+            const deviceName = deviceNameInput.value.trim() || 'Device';
+            const statusDiv = document.getElementById('pairing-status');
+            const token = getToken();
+
+            if (!token) {{
+                showPairingError(statusDiv, 'No authentication token found. Please reload with ?token=dev-token');
+                return;
+            }}
+
+            statusDiv.innerHTML = '<p style="color: #007aff;">Starting pairing...</p>';
+
+            try {{
+                const response = await fetch('/api/pair/start', {{
+                    method: 'POST',
+                    headers: {{
+                        'Content-Type': 'application/json',
+                        'X-Signal-Token': token
+                    }},
+                    body: JSON.stringify({{ device_name: deviceName }})
+                }});
+
+                if (!response.ok) {{
+                    const errorData = await response.json().catch(() => ({{}}));
+                    throw new Error(errorData.message || `HTTP ${{response.status}}`);
+                }}
+
+                const data = await response.json();
+                displayPairingCode(statusDiv, data);
+            }} catch (error) {{
+                showPairingError(statusDiv, 'Failed to start pairing: ' + error.message);
+            }}
+        }}
+
+        function displayPairingCode(statusDiv, data) {{
+            const publicBaseUrl = 'https://your-device.your-tailnet.ts.net';
+            const pairingUrl = `${{publicBaseUrl}}/pair?code=${{data.pairing_code}}`;
+            
+            const expiresIn = data.expires_in_seconds || 300;
+            const minutesLeft = Math.floor(expiresIn / 60);
+
+            const html = `
+                <div style="background: #f5f5f7; border-radius: 8px; padding: 16px; margin-top: 12px;">
+                    <p style="font-size: 13px; color: #6e6e73; margin-bottom: 12px;">
+                        Pairing code expires in ~${{minutesLeft}} minute(s)
+                    </p>
+                    
+                    <div style="background: white; padding: 12px; border-radius: 6px; margin-bottom: 12px; border: 1px solid #e5e5ea;">
+                        <p style="font-size: 12px; color: #6e6e73; margin-bottom: 6px;">Pairing Code:</p>
+                        <div style="display: flex; gap: 8px; align-items: center;">
+                            <code style="flex: 1; font-family: monospace; font-size: 14px; padding: 8px; background: #f9f9f9; border-radius: 4px; word-break: break-all;">${{data.pairing_code}}</code>
+                            <button onclick="copyToClipboard('${{data.pairing_code}}')" class="btn" style="margin: 0; white-space: nowrap;">Copy</button>
+                        </div>
+                    </div>
+
+                    <p style="font-size: 13px; margin-bottom: 8px; color: #1d1d1f;"><strong>Mobile Device:</strong></p>
+                    <a href="${{pairingUrl}}" target="_blank" style="display: inline-block; padding: 12px 16px; background: #007aff; color: white; text-decoration: none; border-radius: 8px; margin-bottom: 12px; font-size: 13px;">
+                        Open Pairing Link →
+                    </a>
+
+                    <p style="font-size: 12px; color: #6e6e73; margin-top: 12px;">
+                        <strong>Or enter code on mobile:</strong><br>
+                        ${{pairingUrl}}
+                    </p>
+
+                    <button onclick="resetPairing()" class="btn" style="background: #f5f5f7; color: #007aff; border: 1px solid #e5e5ea; margin-top: 12px;">
+                        Generate New Code
+                    </button>
+                </div>
+            `;
+            statusDiv.innerHTML = html;
+        }}
+
+        function showPairingError(statusDiv, message) {{
+            statusDiv.innerHTML = `
+                <div style="background: #ffebee; border: 1px solid #ef5350; border-radius: 8px; padding: 12px; color: #c62828; font-size: 13px;">
+                    <strong>Error:</strong> ${{message}}
+                </div>
+            `;
+        }}
+
+        function copyToClipboard(text) {{
+            navigator.clipboard.writeText(text).then(() => {{
+                alert('Pairing code copied to clipboard');
+            }}).catch(() => {{
+                alert('Failed to copy');
+            }});
+        }}
+
+        function resetPairing() {{
+            document.getElementById('pairing-status').innerHTML = '';
+            document.getElementById('device-name-input').value = '';
+            document.getElementById('device-name-input').focus();
+        }}
+
+        // Initialize on page load
+        initializeToken();
+    </script>
+</body>
+</html>"#,
+        active_devices, revoked_devices, devices_html
+    );
+
+    Ok(Html(html))
+}
+
 pub fn create_html_router(
     storage: Arc<Storage>,
     token: Option<String>,
@@ -686,6 +1262,7 @@ pub fn create_html_router(
 ) -> Router {
     Router::new()
         .route("/", get(inbox_page))
+        .route("/dashboard", get(dashboard))
         .route("/message/{id}", get(message_detail_page))
         .route("/api/messages/{id}/replies/form", post(reply_form_handler))
         .with_state(AppState::new(storage, token, require_token_for_read))
