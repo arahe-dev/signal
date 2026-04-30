@@ -2,31 +2,67 @@
 
 Signal is a local-first push + reply protocol for agents, scripts, automations, and devices.
 
-It is not a notes app, not cloud-hosted, and does not require ntfy, Telegram, email, AWS, Oracle, or a VPS. The current phone wakeup path uses Tailscale Serve for private HTTPS and browser/Apple Web Push for iPhone notifications.
+It lets a local program ask a human for input, wake an iPhone through Web Push, receive a reply, and continue from structured JSON.
 
-## 5 Minute Local Setup
+## What It Is Not
 
-1. Install Tailscale on the PC and iPhone.
-2. Login to the same tailnet on both devices.
-3. Start Signal:
+- Not a notes app.
+- Not a cloud service.
+- Not Codex-specific.
+- Not dependent on ntfy, Telegram, email, AWS, Oracle, or a VPS.
+- Not a native mobile app.
+
+Signal uses Tailscale Serve for private HTTPS and browser/Apple Web Push for iPhone notifications.
+
+## Requirements
+
+- Windows PC
+- Rust toolchain
+- Tailscale on PC and iPhone
+- iPhone Safari / Home Screen PWA
+- Same Tailscale tailnet on PC and phone
+
+## 5-Minute Windows Quickstart
+
+Build the developer-preview release:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\start_signal.ps1
+powershell -ExecutionPolicy Bypass -File .\scripts\build_release.ps1
 ```
 
-4. Open the printed phone URL:
+Start the release build:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\dist\signal\scripts\start_release.ps1 -StopExisting
+```
+
+Open the dashboard:
 
 ```text
-https://ari-legion.taild0cc8e.ts.net/app?token=dev-token
+http://127.0.0.1:8791/dashboard?token=dev-token
 ```
 
-5. Add to Home Screen.
-6. Open the Home Screen app and enable notifications.
-7. Test ask:
+Open diagnostics:
+
+```text
+http://127.0.0.1:8791/diagnostics?token=dev-token
+```
+
+## Pair iPhone
+
+1. Open the dashboard.
+2. Click Start Pairing.
+3. Open the pairing link on the phone you want to pair.
+4. Complete pairing.
+5. Open `/app` on the phone.
+6. Tap Enable Notifications.
+7. Add the app to Home Screen if needed.
+
+## Send First Ask
 
 ```powershell
-cargo run -p signal-cli -- `
-  --server http://127.0.0.1:8790 `
+.\dist\signal\signal-cli.exe `
+  --server http://127.0.0.1:8791 `
   --token dev-token `
   ask `
   --title "Test ask" `
@@ -38,31 +74,7 @@ cargo run -p signal-cli -- `
   --json
 ```
 
-8. Reply from the phone.
-9. The CLI prints a stable JSON reply.
-
-## Protocol Commands
-
-Create an ask and wait for a human reply:
-
-```powershell
-cargo run -p signal-cli -- `
-  --server http://127.0.0.1:8790 `
-  --token dev-token `
-  ask `
-  --title "Codex blocked" `
-  --body "Should I rerun only memory eval?" `
-  --source codex `
-  --agent-id codex `
-  --project ivy `
-  --timeout 10m `
-  --reply-option "yes" `
-  --reply-option "no" `
-  --consume `
-  --json
-```
-
-JSON reply shape:
+Expected output after replying from phone:
 
 ```json
 {
@@ -75,54 +87,65 @@ JSON reply shape:
 }
 ```
 
-Timeout shape:
+## Developer Start
 
-```json
-{
-  "status": "timeout",
-  "message_id": "...",
-  "reply": null,
-  "elapsed_seconds": 600,
-  "timed_out": true
-}
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\start_signal.ps1 -Port 8791 -Release
 ```
 
-## HTTP API
+Or manual:
 
-`POST /api/ask`
-
-```json
-{
-  "agent_id": "codex",
-  "project": "ivy",
-  "title": "Codex blocked",
-  "body": "Should I rerun only memory eval?",
-  "timeout_seconds": 600,
-  "priority": "normal",
-  "reply_mode": "text",
-  "reply_options": ["yes", "no", "rerun only failed test"],
-  "source": "codex"
-}
+```powershell
+cargo run -p signal-daemon -- `
+  --host 127.0.0.1 `
+  --port 8791 `
+  --db-path .\signal_demo.db `
+  --token dev-token `
+  --require-token-for-read `
+  --enable-web-push `
+  --public-base-url https://ari-legion.taild0cc8e.ts.net
 ```
 
-`GET /api/ask/:id/wait?timeout_seconds=600`
+## Push Test
 
-Long-polls for a pending reply and returns `replied`, `timeout`, or `not_available`.
+Use the dashboard Push section and set:
 
-## Current Defaults
+- Title: `Signal custom test`
+- Body: `This is a custom debug push from the dashboard.`
+- URL/path: `/app`
 
-- Local daemon: `http://127.0.0.1:8790`
-- Phone app: `https://ari-legion.taild0cc8e.ts.net/app?token=dev-token`
-- Token: `dev-token`
-- DB: `.\signal_demo_8790.db`
-- VAPID file: `.\signal_vapid.json` ignored by Git
+If attempted is `0`, diagnostics will explain whether there are no subscriptions, only revoked/stale subscriptions, or only legacy/unbound subscriptions.
+
+## Revoke And Reset
+
+List devices:
+
+```powershell
+.\dist\signal\signal-cli.exe --server http://127.0.0.1:8791 --token dev-token devices list
+```
+
+Reset devices and push subscriptions:
+
+```powershell
+.\dist\signal\signal-cli.exe --server http://127.0.0.1:8791 --token dev-token devices reset-all
+```
+
+The dashboard also has a dangerous Reset all devices button. It preserves messages and replies.
+
+## Troubleshooting
+
+- Dashboard says no active push subscriptions: pair the phone, open `/app`, and tap Enable Notifications.
+- Push shows legacy/unbound subscriptions: re-enable notifications from the paired phone, or use Test Push when exactly one active device exists so Signal can claim the legacy subscription.
+- iPhone icon or push state looks stale: delete the Home Screen icon, clear Safari website data for the Tailscale host, reopen the phone URL, and add to Home Screen again.
+- Port is in use: start with `-StopExisting` or choose `-Port 8792`.
+- Tailscale CLI missing: start release with `-NoTailscaleServe` and configure Tailscale Serve manually.
 
 ## Security Notes
 
-- This is local-first infrastructure, not a public cloud service.
-- Keep the daemon bound to `127.0.0.1` and expose through private Tailscale Serve.
-- The token is development-grade and currently passed in URLs for private tailnet dogfood.
-- Do not commit `signal_vapid.json`, SQLite DBs, or `target/`.
+- Keep the daemon bound to `127.0.0.1`.
+- Expose through private Tailscale Serve, not the public internet.
+- Do not commit `signal.config.json`, `signal_vapid.json`, SQLite DBs, `target/`, or `dist/`.
+- `dev-token` is for developer-preview dogfood only.
 
 ## Verification
 

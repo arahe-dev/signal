@@ -1,14 +1,10 @@
 {
   "host": "127.0.0.1",
-  "port": 8790,
-  "db_path": "./signal_demo_8790.db",
-  "public_base_url": "https://ari-legion.taild0cc8e.ts.net",
-  "admin_token": "dev-token-change-in-production",
+  "port": 8791,
+  "db_path": ".\\signal_demo.db",
+  "token": "dev-token",
   "require_token_for_read": true,
   "enable_web_push": true,
-  "vapid_file": "./signal_vapid.json",
-  "vapid_subject": "mailto:signal@example.com",
-  "device_pairing_enabled": true,
-  "pairing_code_ttl_seconds": 300,
-  "tailscale_serve_enabled": false
+  "public_base_url": "https://ari-legion.taild0cc8e.ts.net",
+  "tailscale_serve": true
 }
