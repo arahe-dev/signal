@@ -17,8 +17,49 @@ pub enum StorageError {
     NotFound(String),
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct PushSubscriptionCounts {
+    pub total: usize,
+    pub active_bound: usize,
+    pub active_legacy: usize,
+    pub revoked_or_stale: usize,
+    pub revoked: usize,
+    pub stale: usize,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct DeviceResetSummary {
+    pub devices_revoked: usize,
+    pub subscriptions_revoked: usize,
+    pub pairing_codes_cleared: usize,
+}
+
 pub struct Storage {
     conn: Mutex<Connection>,
+}
+
+fn push_subscription_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<PushSubscription> {
+    let created_at_str: String = row.get(6)?;
+    let last_success_at_str: Option<String> = row.get(7)?;
+    Ok(PushSubscription {
+        id: row.get(0)?,
+        device_id: row.get(1)?,
+        endpoint: row.get(2)?,
+        p256dh: row.get(3)?,
+        auth: row.get(4)?,
+        user_agent: row.get(5)?,
+        created_at: chrono::DateTime::parse_from_rfc3339(&created_at_str)
+            .map(|dt| dt.with_timezone(&chrono::Utc))
+            .unwrap_or_else(|_| chrono::Utc::now()),
+        last_success_at: last_success_at_str.and_then(|s| {
+            chrono::DateTime::parse_from_rfc3339(&s)
+                .map(|dt| dt.with_timezone(&chrono::Utc))
+                .ok()
+        }),
+        last_error: row.get(8)?,
+        status: row.get(9)?,
+        vapid_public_key_hash: row.get(10)?,
+    })
 }
 
 impl Storage {
@@ -638,35 +679,75 @@ impl Storage {
              WHERE s.status = 'active' AND (s.device_id IS NULL OR d.revoked_at IS NULL)",
         )?;
 
-        let rows = stmt.query_map([], |row| {
-            let created_at_str: String = row.get(6)?;
-            let last_success_at_str: Option<String> = row.get(7)?;
-            Ok(PushSubscription {
-                id: row.get(0)?,
-                device_id: row.get(1)?,
-                endpoint: row.get(2)?,
-                p256dh: row.get(3)?,
-                auth: row.get(4)?,
-                user_agent: row.get(5)?,
-                created_at: chrono::DateTime::parse_from_rfc3339(&created_at_str)
-                    .map(|dt| dt.with_timezone(&chrono::Utc))
-                    .unwrap_or_else(|_| chrono::Utc::now()),
-                last_success_at: last_success_at_str.and_then(|s| {
-                    chrono::DateTime::parse_from_rfc3339(&s)
-                        .map(|dt| dt.with_timezone(&chrono::Utc))
-                        .ok()
-                }),
-                last_error: row.get(8)?,
-                status: row.get(9)?,
-                vapid_public_key_hash: row.get(10)?,
-            })
-        })?;
+        let rows = stmt.query_map([], push_subscription_from_row)?;
 
         let mut subs = Vec::new();
         for row in rows {
             subs.push(row?);
         }
         Ok(subs)
+    }
+
+    pub fn list_push_subscriptions(&self) -> Result<Vec<PushSubscription>, StorageError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, device_id, endpoint, p256dh, auth, user_agent, created_at, last_success_at, last_error, status, vapid_public_key_hash
+             FROM push_subscriptions ORDER BY created_at DESC",
+        )?;
+
+        let rows = stmt.query_map([], push_subscription_from_row)?;
+
+        let mut subs = Vec::new();
+        for row in rows {
+            subs.push(row?);
+        }
+        Ok(subs)
+    }
+
+    pub fn push_subscription_counts(&self) -> Result<PushSubscriptionCounts, StorageError> {
+        let subscriptions = self.list_push_subscriptions()?;
+        let devices = self.list_devices()?;
+        let active_devices = devices
+            .into_iter()
+            .map(|device| {
+                let is_active = device.is_active();
+                (device.id, is_active)
+            })
+            .collect::<std::collections::HashMap<_, _>>();
+
+        let mut counts = PushSubscriptionCounts {
+            total: subscriptions.len(),
+            ..Default::default()
+        };
+
+        for subscription in subscriptions {
+            if subscription.status != "active" {
+                counts.revoked_or_stale += 1;
+                if subscription.status == "revoked" {
+                    counts.revoked += 1;
+                } else {
+                    counts.stale += 1;
+                }
+                continue;
+            }
+
+            match subscription.device_id.as_deref() {
+                None => counts.active_legacy += 1,
+                Some(device_id) => match active_devices.get(device_id) {
+                    Some(true) => counts.active_bound += 1,
+                    Some(false) => {
+                        counts.revoked_or_stale += 1;
+                        counts.revoked += 1;
+                    }
+                    None => {
+                        counts.revoked_or_stale += 1;
+                        counts.stale += 1;
+                    }
+                },
+            }
+        }
+
+        Ok(counts)
     }
 
     pub fn update_push_subscription_error(
@@ -677,6 +758,15 @@ impl Storage {
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "UPDATE push_subscriptions SET last_error = ?1 WHERE id = ?2",
+            params![error, id],
+        )?;
+        Ok(())
+    }
+
+    pub fn mark_push_subscription_stale(&self, id: &str, error: &str) -> Result<(), StorageError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE push_subscriptions SET status = 'stale', last_error = ?1 WHERE id = ?2",
             params![error, id],
         )?;
         Ok(())
@@ -852,6 +942,32 @@ impl Storage {
             params![id],
         )?;
         Ok(())
+    }
+
+    pub fn reset_all_devices(&self) -> Result<DeviceResetSummary, StorageError> {
+        let conn = self.conn.lock().unwrap();
+        let now = chrono::Utc::now().to_rfc3339();
+
+        let devices_revoked = conn.execute(
+            "UPDATE devices SET revoked_at = ?1 WHERE revoked_at IS NULL",
+            params![now],
+        )?;
+        let subscriptions_revoked = conn.execute(
+            "UPDATE push_subscriptions
+             SET status = 'revoked', last_error = 'device_reset'
+             WHERE status != 'revoked'",
+            [],
+        )?;
+        let pairing_codes_cleared = conn.execute(
+            "DELETE FROM pairing_codes WHERE used_at IS NULL OR expires_at <= ?1",
+            params![now],
+        )?;
+
+        Ok(DeviceResetSummary {
+            devices_revoked,
+            subscriptions_revoked,
+            pairing_codes_cleared,
+        })
     }
 
     pub fn mark_push_subscriptions_revoked_for_device(
@@ -1178,5 +1294,160 @@ mod tests {
 
         storage.revoke_device(&device.id).unwrap();
         assert_eq!(storage.list_active_push_subscriptions().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn reset_all_devices_revokes_devices_and_subscriptions() {
+        let storage = make_storage();
+        let raw_token = crate::generate_device_token();
+        let device = Device::new(
+            "device-reset".to_string(),
+            "phone".to_string(),
+            "phone".to_string(),
+            crate::hash_token(&raw_token),
+            crate::get_token_prefix(&raw_token),
+        );
+        storage.create_device(&device).unwrap();
+
+        let mut sub = PushSubscription::new(
+            "https://web.push.apple.com/reset".to_string(),
+            "p256dh".to_string(),
+            "auth".to_string(),
+            None,
+        );
+        sub.device_id = Some(device.id.clone());
+        storage.upsert_push_subscription(&sub).unwrap();
+
+        let raw_code = crate::generate_pairing_code();
+        let pairing = PairingCode::new(
+            crate::hash_token(&raw_code),
+            crate::get_token_prefix(&raw_code),
+            300,
+        );
+        storage.create_pairing_code(&pairing).unwrap();
+
+        let summary = storage.reset_all_devices().unwrap();
+        assert_eq!(summary.devices_revoked, 1);
+        assert_eq!(summary.subscriptions_revoked, 1);
+        assert_eq!(summary.pairing_codes_cleared, 1);
+        assert!(!storage.get_device(&device.id).unwrap().is_active());
+        assert_eq!(storage.list_active_push_subscriptions().unwrap().len(), 0);
+        assert!(storage.get_pairing_code(&pairing.code_hash).is_err());
+    }
+
+    #[test]
+    fn reset_all_devices_keeps_messages_and_replies() {
+        let storage = make_storage();
+        let message = make_message("keep", MessageStatus::PendingReply, Some("signal"), None);
+        storage.create_message(&message).unwrap();
+        let reply = Reply::new(
+            message.id.clone(),
+            "yes".to_string(),
+            "phone".to_string(),
+            None,
+        );
+        storage.create_reply(&reply).unwrap();
+
+        storage.reset_all_devices().unwrap();
+
+        assert_eq!(storage.get_message(&message.id).unwrap().id, message.id);
+        assert_eq!(storage.get_reply(&reply.id).unwrap().id, reply.id);
+    }
+
+    #[test]
+    fn revoking_one_device_keeps_other_active_subscription_sendable() {
+        let storage = make_storage();
+        let device_1 = Device::new(
+            "device-one".to_string(),
+            "old phone".to_string(),
+            "phone".to_string(),
+            crate::hash_token("token-one"),
+            "token-one".to_string(),
+        );
+        let device_2 = Device::new(
+            "device-two".to_string(),
+            "new phone".to_string(),
+            "phone".to_string(),
+            crate::hash_token("token-two"),
+            "token-two".to_string(),
+        );
+        storage.create_device(&device_1).unwrap();
+        storage.create_device(&device_2).unwrap();
+
+        let mut sub_1 = PushSubscription::new(
+            "https://web.push.apple.com/one".to_string(),
+            "p256dh".to_string(),
+            "auth".to_string(),
+            None,
+        );
+        sub_1.device_id = Some(device_1.id.clone());
+        storage.upsert_push_subscription(&sub_1).unwrap();
+
+        let mut sub_2 = PushSubscription::new(
+            "https://web.push.apple.com/two".to_string(),
+            "p256dh".to_string(),
+            "auth".to_string(),
+            None,
+        );
+        sub_2.device_id = Some(device_2.id.clone());
+        storage.upsert_push_subscription(&sub_2).unwrap();
+
+        storage.revoke_device(&device_1.id).unwrap();
+        let active = storage.list_active_push_subscriptions().unwrap();
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].device_id.as_deref(), Some(device_2.id.as_str()));
+    }
+
+    #[test]
+    fn push_subscription_counts_distinguish_active_revoked_and_legacy() {
+        let storage = make_storage();
+        let active_device = Device::new(
+            "active-device".to_string(),
+            "phone".to_string(),
+            "phone".to_string(),
+            crate::hash_token("active-token"),
+            "active".to_string(),
+        );
+        let revoked_device = Device::new(
+            "revoked-device".to_string(),
+            "old phone".to_string(),
+            "phone".to_string(),
+            crate::hash_token("revoked-token"),
+            "revoked".to_string(),
+        );
+        storage.create_device(&active_device).unwrap();
+        storage.create_device(&revoked_device).unwrap();
+
+        let mut bound_active = PushSubscription::new(
+            "https://web.push.apple.com/active".to_string(),
+            "p256dh".to_string(),
+            "auth".to_string(),
+            None,
+        );
+        bound_active.device_id = Some(active_device.id.clone());
+        storage.upsert_push_subscription(&bound_active).unwrap();
+
+        let legacy = PushSubscription::new(
+            "https://web.push.apple.com/legacy".to_string(),
+            "p256dh".to_string(),
+            "auth".to_string(),
+            None,
+        );
+        storage.upsert_push_subscription(&legacy).unwrap();
+
+        let mut bound_revoked = PushSubscription::new(
+            "https://web.push.apple.com/revoked".to_string(),
+            "p256dh".to_string(),
+            "auth".to_string(),
+            None,
+        );
+        bound_revoked.device_id = Some(revoked_device.id.clone());
+        storage.upsert_push_subscription(&bound_revoked).unwrap();
+        storage.revoke_device(&revoked_device.id).unwrap();
+
+        let counts = storage.push_subscription_counts().unwrap();
+        assert_eq!(counts.active_bound, 1);
+        assert_eq!(counts.active_legacy, 1);
+        assert_eq!(counts.revoked_or_stale, 1);
     }
 }

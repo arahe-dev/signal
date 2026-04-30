@@ -391,6 +391,14 @@ pub struct DeviceRevokeResponse {
     pub message: String,
 }
 
+#[derive(Debug, Serialize)]
+pub struct DeviceResetResponse {
+    pub success: bool,
+    pub devices_revoked: usize,
+    pub subscriptions_revoked: usize,
+    pub pairing_codes_cleared: usize,
+}
+
 // Device handlers
 async fn list_devices(
     State(state): State<AppState>,
@@ -451,6 +459,33 @@ async fn revoke_device(
     }))
 }
 
+async fn reset_all_devices(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<DeviceResetResponse>, axum::response::Response> {
+    check_admin_auth(&state, &headers)?;
+
+    let summary = state.storage.reset_all_devices().map_err(|e| {
+        make_error_response(
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            "reset_failed",
+            &format!("Failed to reset devices: {}", e),
+        )
+    })?;
+
+    info!(
+        "Device reset: revoked {} devices, disabled {} subscriptions, cleared {} pairing codes",
+        summary.devices_revoked, summary.subscriptions_revoked, summary.pairing_codes_cleared
+    );
+
+    Ok(Json(DeviceResetResponse {
+        success: true,
+        devices_revoked: summary.devices_revoked,
+        subscriptions_revoked: summary.subscriptions_revoked,
+        pairing_codes_cleared: summary.pairing_codes_cleared,
+    }))
+}
+
 pub fn create_api_router(
     storage: Arc<Storage>,
     token: Option<String>,
@@ -481,6 +516,7 @@ pub fn create_api_router(
         .route("/api/pair/start", post(pair_start))
         .route("/api/pair/complete", post(pair_complete))
         .route("/api/devices", get(list_devices))
+        .route("/api/devices/reset-all", post(reset_all_devices))
         .route("/api/devices/{id}/revoke", post(revoke_device))
         .with_state(state)
 }
@@ -1046,6 +1082,7 @@ async fn dashboard(
     let device_list = state.storage.list_devices().unwrap_or_default();
     let active_devices = device_list.iter().filter(|d| d.is_active()).count();
     let revoked_devices = device_list.iter().filter(|d| !d.is_active()).count();
+    let push_counts = state.storage.push_subscription_counts().unwrap_or_default();
 
     let devices_html = if device_list.is_empty() {
         "<p class=\"note\">No devices paired yet.</p>".to_string()
@@ -1183,6 +1220,18 @@ async fn dashboard(
                     <div class="stat-value">{}</div>
                     <div class="stat-label">Revoked Devices</div>
                 </div>
+                <div class="stat">
+                    <div class="stat-value">{}</div>
+                    <div class="stat-label">Active Push Subscriptions</div>
+                </div>
+                <div class="stat">
+                    <div class="stat-value">{}</div>
+                    <div class="stat-label">Revoked/Stale Push</div>
+                </div>
+                <div class="stat">
+                    <div class="stat-value">{}</div>
+                    <div class="stat-label">Legacy/Unbound Push</div>
+                </div>
             </div>
         </div>
 
@@ -1203,12 +1252,20 @@ async fn dashboard(
                 </tbody>
             </table>
             <p class="note">Revoke a device to prevent it from accessing messages.</p>
+            <button id="reset-all-devices-btn" class="btn" style="margin-top: 12px; background: #c62828;">Reset all devices</button>
+            <div id="device-reset-status" style="margin-top: 12px;"></div>
         </div>
 
         <div class="card">
             <h2>Push</h2>
-            <p>Send a diagnostic push to active subscriptions.</p>
-            <button id="test-push-btn" class="btn" style="margin-top: 12px;">Test Push</button>
+            <p>Send a diagnostic push to active device-bound subscriptions.</p>
+            <label style="display:block;font-size:13px;color:#6e6e73;margin-top:12px;">Debug notification title</label>
+            <input type="text" id="push-title-input" value="Signal custom test" maxlength="120" style="padding:8px;border:1px solid #e5e5ea;border-radius:8px;width:100%;margin-top:4px;font-size:14px;">
+            <label style="display:block;font-size:13px;color:#6e6e73;margin-top:12px;">Debug notification body</label>
+            <textarea id="push-body-input" maxlength="320" style="padding:8px;border:1px solid #e5e5ea;border-radius:8px;width:100%;margin-top:4px;font-size:14px;min-height:80px;">This is a custom debug push from the dashboard.</textarea>
+            <label style="display:block;font-size:13px;color:#6e6e73;margin-top:12px;">Optional URL/path</label>
+            <input type="text" id="push-url-input" value="/app" style="padding:8px;border:1px solid #e5e5ea;border-radius:8px;width:100%;margin-top:4px;font-size:14px;">
+            <button id="test-push-btn" class="btn" style="margin-top: 12px;">Send Test Push</button>
             <div id="push-test-status" style="margin-top: 12px;"></div>
         </div>
 
@@ -1269,6 +1326,35 @@ async fn dashboard(
             }}
         }}
 
+        document.getElementById('reset-all-devices-btn')?.addEventListener('click', resetAllDevices);
+
+        async function resetAllDevices() {{
+            const statusDiv = document.getElementById('device-reset-status');
+            if (!confirm('This will revoke all paired devices and disable all push subscriptions. Messages and replies are kept. Continue?')) {{
+                return;
+            }}
+            const token = getToken();
+            if (!token) {{
+                statusDiv.innerHTML = '<div style="color:#c62828;">Missing admin token.</div>';
+                return;
+            }}
+            statusDiv.innerHTML = '<div style="color:#007aff;">Resetting devices and subscriptions...</div>';
+            try {{
+                const response = await fetch('/api/devices/reset-all', {{
+                    method: 'POST',
+                    headers: {{ 'X-Signal-Token': token }}
+                }});
+                const body = await parseJsonResponse(response);
+                if (!response.ok || body.success === false) {{
+                    throw new Error(body.message || ('HTTP ' + response.status));
+                }}
+                statusDiv.innerHTML = '<pre style="white-space:pre-wrap;background:#f5f5f7;padding:12px;border-radius:8px;">' + JSON.stringify(body, null, 2) + '</pre>';
+                setTimeout(() => location.reload(), 1200);
+            }} catch (error) {{
+                statusDiv.innerHTML = '<div style="color:#c62828;">Reset failed: ' + error.message + '</div>';
+            }}
+        }}
+
         document.getElementById('test-push-btn')?.addEventListener('click', testPush);
 
         async function testPush() {{
@@ -1280,15 +1366,26 @@ async fn dashboard(
             }}
             statusDiv.innerHTML = '<div style="color:#007aff;">Sending test push...</div>';
             try {{
+                const payload = {{
+                    title: document.getElementById('push-title-input')?.value || 'Signal test',
+                    body: document.getElementById('push-body-input')?.value || 'Debug push from Signal dashboard.',
+                    url: document.getElementById('push-url-input')?.value || '/app'
+                }};
                 const response = await fetch('/api/push/test', {{
                     method: 'POST',
-                    headers: {{ 'X-Signal-Token': token }}
+                    headers: {{
+                        'Content-Type': 'application/json',
+                        'X-Signal-Token': token
+                    }},
+                    body: JSON.stringify(payload)
                 }});
                 const body = await parseJsonResponse(response);
-                if (!response.ok || body.success === false) {{
+                if (!response.ok) {{
                     throw new Error(body.message || ('HTTP ' + response.status));
                 }}
-                statusDiv.innerHTML = '<div style="color:#2e7d32;">' + (body.message || 'Push sent') + '</div>';
+                const color = body.success === false ? '#c77c02' : '#2e7d32';
+                statusDiv.innerHTML = '<div style="color:' + color + ';">' + (body.message || 'Push test completed') + '</div>' +
+                    '<pre style="white-space:pre-wrap;background:#f5f5f7;padding:12px;border-radius:8px;margin-top:8px;">' + JSON.stringify(body, null, 2) + '</pre>';
             }} catch (error) {{
                 statusDiv.innerHTML = '<div style="color:#c62828;">Push failed: ' + error.message + '</div>';
             }}
@@ -1410,7 +1507,12 @@ async fn dashboard(
     </script>
 </body>
 </html>"#,
-        active_devices, revoked_devices, devices_html
+        active_devices,
+        revoked_devices,
+        push_counts.active_bound,
+        push_counts.revoked_or_stale,
+        push_counts.active_legacy,
+        devices_html
     );
 
     Ok(Html(html))

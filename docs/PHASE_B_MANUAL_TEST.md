@@ -39,7 +39,15 @@ https://your-device.your-tailnet.ts.net/pair?code=pair_<full_code>
 - VAPID key fetch returns `length=65`, `firstByte=4`
 - subscription saves successfully
 
-9. Run ask:
+9. Dashboard push management checks:
+
+- Counts distinguish active devices, revoked devices, active push subscriptions, revoked/stale push subscriptions, and legacy/unbound push subscriptions.
+- Send Test Push with title `Signal custom test` and body `This is a custom debug push from the dashboard.`
+- The JSON result should show attempted/sent/failed/skipped counts.
+- Click Reset all devices and confirm. Messages and replies should remain, devices should become revoked, and push subscriptions should become revoked.
+- Pair the phone again and enable notifications again before continuing.
+
+10. Run ask:
 
 ```powershell
 cargo run -p signal-cli -- `
@@ -55,16 +63,22 @@ cargo run -p signal-cli -- `
   --json
 ```
 
-10. Tap the notification. It should open the exact message.
+11. Tap the notification. It should open the exact message.
 
-11. Reply from phone. CLI should print JSON with `status: "replied"`.
+12. Reply from phone. CLI should print JSON with `status: "replied"`.
 
-12. Revoke device from dashboard.
+13. Revoke device from dashboard.
 
-13. Confirm old phone token cannot access:
+14. Confirm old phone token cannot access:
 
 - `/app` shows Pair Again / revoked state on API calls
 - old token receives `device_revoked`
 - push subscriptions for that device are skipped
 
-14. Pair again with a new code.
+15. Send Test Push again. Expected result:
+
+- `attempted` is `0` if no active device-bound subscriptions exist
+- revoked/stale subscriptions are counted as skipped
+- the endpoint returns JSON instead of crashing or treating no-active as a hard error
+
+16. Pair again with a new code.

@@ -44,6 +44,10 @@ pub struct PushSummary {
     pub attempted: usize,
     pub sent: usize,
     pub failed: usize,
+    pub skipped: usize,
+    pub skipped_revoked: usize,
+    pub skipped_stale: usize,
+    pub skipped_legacy: usize,
     pub results: Vec<PushResult>,
     pub errors: Vec<PushResult>,
 }
@@ -268,6 +272,10 @@ pub async fn send_web_push_to_all_active(
         attempted,
         sent,
         failed,
+        skipped: 0,
+        skipped_revoked: 0,
+        skipped_stale: 0,
+        skipped_legacy: 0,
         results,
         errors,
     }

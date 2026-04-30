@@ -132,6 +132,11 @@ enum DevicesSubcommand {
         #[arg(long)]
         json: bool,
     },
+    #[command(alias = "reset")]
+    ResetAll {
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Debug, Serialize)]
@@ -259,6 +264,14 @@ struct DeviceListResponse {
 struct DeviceRevokeResponse {
     success: bool,
     message: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct DeviceResetResponse {
+    success: bool,
+    devices_revoked: usize,
+    subscriptions_revoked: usize,
+    pairing_codes_cleared: usize,
 }
 
 struct ApiClient {
@@ -433,6 +446,12 @@ impl ApiClient {
         let url = format!("{}/api/devices/{}/revoke", self.base_url, device_id);
         let response = self.add_auth(self.client.post(&url)).send().await?;
         parse_response(response, "revoke device").await
+    }
+
+    async fn reset_all_devices(&self) -> Result<DeviceResetResponse, Box<dyn std::error::Error>> {
+        let url = format!("{}/api/devices/reset-all", self.base_url);
+        let response = self.add_auth(self.client.post(&url)).send().await?;
+        parse_response(response, "reset all devices").await
     }
 }
 
@@ -694,6 +713,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     println!("Device revoked: {}", response.message);
                 } else {
                     println!("Device revoke failed: {}", response.message);
+                }
+            }
+            DevicesSubcommand::ResetAll { json } => {
+                let response = client.reset_all_devices().await?;
+                if json {
+                    println!("{}", serde_json::to_string(&response)?);
+                } else if response.success {
+                    println!("Reset all devices complete.");
+                    println!("Devices revoked: {}", response.devices_revoked);
+                    println!("Subscriptions revoked: {}", response.subscriptions_revoked);
+                    println!("Pairing codes cleared: {}", response.pairing_codes_cleared);
+                } else {
+                    println!("Reset all devices failed.");
                 }
             }
         },
