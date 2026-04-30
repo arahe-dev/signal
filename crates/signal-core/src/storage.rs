@@ -34,6 +34,13 @@ pub struct DeviceResetSummary {
     pub pairing_codes_cleared: usize,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct PushSubscriptionCleanupSummary {
+    pub revoked_deleted: usize,
+    pub stale_deleted: usize,
+    pub legacy_deleted: usize,
+}
+
 pub struct Storage {
     conn: Mutex<Connection>,
 }
@@ -1030,6 +1037,31 @@ impl Storage {
         })
     }
 
+    pub fn clear_inactive_push_subscriptions(
+        &self,
+    ) -> Result<PushSubscriptionCleanupSummary, StorageError> {
+        let conn = self.conn.lock().unwrap();
+
+        let revoked_deleted = conn.execute(
+            "DELETE FROM push_subscriptions WHERE status = 'revoked'",
+            [],
+        )?;
+        let stale_deleted = conn.execute(
+            "DELETE FROM push_subscriptions WHERE status != 'active'",
+            [],
+        )?;
+        let legacy_deleted = conn.execute(
+            "DELETE FROM push_subscriptions WHERE status = 'active' AND device_id IS NULL",
+            [],
+        )?;
+
+        Ok(PushSubscriptionCleanupSummary {
+            revoked_deleted,
+            stale_deleted,
+            legacy_deleted,
+        })
+    }
+
     pub fn mark_push_subscriptions_revoked_for_device(
         &self,
         device_id: &str,
@@ -1574,6 +1606,63 @@ mod tests {
         assert_eq!(claimed, 1);
         let counts = storage.push_subscription_counts().unwrap();
         assert_eq!(counts.active_legacy, 0);
+        assert_eq!(counts.active_bound, 1);
+    }
+
+    #[test]
+    fn clear_inactive_push_subscriptions_removes_only_inactive_and_legacy() {
+        let storage = make_storage();
+        let active_device = Device::new(
+            "cleanup-active".to_string(),
+            "phone".to_string(),
+            "phone".to_string(),
+            crate::hash_token("cleanup-active-token"),
+            "cleanup-active".to_string(),
+        );
+        let revoked_device = Device::new(
+            "cleanup-revoked".to_string(),
+            "old phone".to_string(),
+            "phone".to_string(),
+            crate::hash_token("cleanup-revoked-token"),
+            "cleanup-revoked".to_string(),
+        );
+        storage.create_device(&active_device).unwrap();
+        storage.create_device(&revoked_device).unwrap();
+
+        let mut active = PushSubscription::new(
+            "https://web.push.apple.com/cleanup-active".to_string(),
+            "p256dh".to_string(),
+            "auth".to_string(),
+            None,
+        );
+        active.device_id = Some(active_device.id.clone());
+        storage.upsert_push_subscription(&active).unwrap();
+
+        let mut revoked = PushSubscription::new(
+            "https://web.push.apple.com/cleanup-revoked".to_string(),
+            "p256dh".to_string(),
+            "auth".to_string(),
+            None,
+        );
+        revoked.device_id = Some(revoked_device.id.clone());
+        storage.upsert_push_subscription(&revoked).unwrap();
+        storage.revoke_device(&revoked_device.id).unwrap();
+
+        let legacy = PushSubscription::new(
+            "https://web.push.apple.com/cleanup-legacy".to_string(),
+            "p256dh".to_string(),
+            "auth".to_string(),
+            None,
+        );
+        storage.upsert_push_subscription(&legacy).unwrap();
+
+        let summary = storage.clear_inactive_push_subscriptions().unwrap();
+
+        assert_eq!(summary.revoked_deleted, 1);
+        assert_eq!(summary.stale_deleted, 0);
+        assert_eq!(summary.legacy_deleted, 1);
+        let counts = storage.push_subscription_counts().unwrap();
+        assert_eq!(counts.total, 1);
         assert_eq!(counts.active_bound, 1);
     }
 }

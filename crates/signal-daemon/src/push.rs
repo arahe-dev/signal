@@ -51,6 +51,14 @@ pub struct PushSubscriptionResponse {
 }
 
 #[derive(Serialize)]
+pub struct ClearStaleSubscriptionsResponse {
+    success: bool,
+    revoked_deleted: usize,
+    stale_deleted: usize,
+    legacy_deleted: usize,
+}
+
+#[derive(Serialize)]
 pub struct PushStatusResponse {
     subscriptions_count: usize,
     active_subscriptions: usize,
@@ -103,6 +111,10 @@ pub fn create_push_router(
         .route("/api/push/subscribe", post(subscribe))
         .route("/api/push/test", post(test_push))
         .route("/api/push/status", get(push_status))
+        .route(
+            "/api/push/subscriptions/clear-stale",
+            post(clear_stale_subscriptions),
+        )
         .with_state(state)
 }
 
@@ -173,6 +185,20 @@ fn authenticate_push(
 
     let _ = state.storage.update_device_last_seen(&device.id);
     Ok(Some(device.id))
+}
+
+fn authenticate_push_admin(
+    state: &PushState,
+    headers: &HeaderMap,
+) -> Result<(), axum::response::Response> {
+    match authenticate_push(state, headers)? {
+        None => Ok(()),
+        Some(_) => Err(make_error_response(
+            axum::http::StatusCode::FORBIDDEN,
+            "admin_required",
+            "Admin token required",
+        )),
+    }
 }
 
 fn select_push_subscriptions(
@@ -447,6 +473,31 @@ async fn push_status(
     }))
 }
 
+async fn clear_stale_subscriptions(
+    State(state): State<PushState>,
+    headers: HeaderMap,
+) -> Result<Json<ClearStaleSubscriptionsResponse>, axum::response::Response> {
+    authenticate_push_admin(&state, &headers)?;
+
+    let summary = state
+        .storage
+        .clear_inactive_push_subscriptions()
+        .map_err(|e| {
+            make_error_response(
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                "storage_error",
+                &format!("Failed to clear inactive push subscriptions: {}", e),
+            )
+        })?;
+
+    Ok(Json(ClearStaleSubscriptionsResponse {
+        success: true,
+        revoked_deleted: summary.revoked_deleted,
+        stale_deleted: summary.stale_deleted,
+        legacy_deleted: summary.legacy_deleted,
+    }))
+}
+
 async fn vapid_public_key(
     State(state): State<PushState>,
     headers: HeaderMap,
@@ -479,32 +530,6 @@ async fn vapid_public_key(
         length: Some(decoded.len()),
         first_byte: decoded.first().copied(),
     }))
-}
-
-pub fn send_push_notifications(storage: &signal_core::Storage) {
-    let subscriptions = match storage.list_active_push_subscriptions() {
-        Ok(subs) => subs,
-        Err(e) => {
-            tracing::warn!("Failed to list push subscriptions: {}", e);
-            return;
-        }
-    };
-
-    if subscriptions.is_empty() {
-        return;
-    }
-
-    // For now, just log that we'd send - full VAPID push requires more setup
-    tracing::info!(
-        "Would send push notification to {} subscriptions",
-        subscriptions.len()
-    );
-
-    for sub in subscriptions {
-        // In production, this would use web-push crate with VAPID
-        // For demo, we just log the attempt
-        tracing::debug!("Push to endpoint: {}", sub.endpoint);
-    }
 }
 
 #[cfg(test)]

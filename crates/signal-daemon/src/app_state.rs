@@ -25,6 +25,7 @@ pub struct AppState {
 }
 
 impl AppState {
+    #[cfg(test)]
     pub fn new(storage: Arc<Storage>, token: Option<String>, require_token_for_read: bool) -> Self {
         Self::with_push(
             storage,
@@ -74,10 +75,6 @@ impl AppState {
         Ok(AuthIdentity::Device {
             device_id: device.id,
         })
-    }
-
-    pub fn check_token(&self, token: &str) -> bool {
-        self.authenticate_token(token).is_ok()
     }
 
     pub fn is_auth_required(&self) -> bool {

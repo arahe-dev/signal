@@ -36,7 +36,6 @@ pub struct ListMessagesQuery {
 pub struct ListRepliesQuery {
     agent_id: Option<String>,
     project: Option<String>,
-    status: Option<String>,
 }
 
 #[derive(serde::Serialize)]
@@ -1536,7 +1535,9 @@ async fn dashboard(
             <label style="display:block;font-size:13px;color:#6e6e73;margin-top:12px;">Optional URL/path</label>
             <input type="text" id="push-url-input" value="/app" style="padding:8px;border:1px solid #e5e5ea;border-radius:8px;width:100%;margin-top:4px;font-size:14px;">
             <button id="test-push-btn" class="btn" style="margin-top: 12px;">Send Test Push</button>
+            <button id="clear-stale-push-btn" class="btn" style="margin-top: 12px; background:#6e6e73;">Clear Stale/Legacy Subscriptions</button>
             <div id="push-test-status" style="margin-top: 12px;"></div>
+            <p class="note">Legacy subscriptions are old browser subscriptions not tied to a paired device. Clearing stale/legacy subscriptions does not delete devices, messages, or replies.</p>
         </div>
 
         <div class="card">
@@ -1626,6 +1627,7 @@ async fn dashboard(
         }}
 
         document.getElementById('test-push-btn')?.addEventListener('click', testPush);
+        document.getElementById('clear-stale-push-btn')?.addEventListener('click', clearStalePush);
 
         async function testPush() {{
             const statusDiv = document.getElementById('push-test-status');
@@ -1668,6 +1670,34 @@ async fn dashboard(
                     '<pre style="white-space:pre-wrap;background:#f5f5f7;padding:12px;border-radius:8px;margin-top:8px;">' + JSON.stringify(body, null, 2) + '</pre>';
             }} catch (error) {{
                 statusDiv.innerHTML = '<div style="color:#c62828;">Push failed: ' + error.message + '</div>';
+            }}
+        }}
+
+        async function clearStalePush() {{
+            const statusDiv = document.getElementById('push-test-status');
+            const token = getToken();
+            if (!token) {{
+                statusDiv.innerHTML = '<div style="color:#c62828;">Missing admin token.</div>';
+                return;
+            }}
+            if (!confirm('This will delete stale, revoked, and legacy/unbound push subscriptions. Devices, messages, and replies are kept. Continue?')) {{
+                return;
+            }}
+            statusDiv.innerHTML = '<div style="color:#007aff;">Clearing stale and legacy subscriptions...</div>';
+            try {{
+                const response = await fetch('/api/push/subscriptions/clear-stale', {{
+                    method: 'POST',
+                    headers: {{ 'X-Signal-Token': token }}
+                }});
+                const body = await parseJsonResponse(response);
+                if (!response.ok || body.success === false) {{
+                    throw new Error(body.message || ('HTTP ' + response.status));
+                }}
+                statusDiv.innerHTML = '<div style="color:#2e7d32;">Inactive push subscriptions cleared.</div>' +
+                    '<pre style="white-space:pre-wrap;background:#f5f5f7;padding:12px;border-radius:8px;margin-top:8px;">' + JSON.stringify(body, null, 2) + '</pre>';
+                setTimeout(() => location.reload(), 1200);
+            }} catch (error) {{
+                statusDiv.innerHTML = '<div style="color:#c62828;">Clear stale failed: ' + error.message + '</div>';
             }}
         }}
 

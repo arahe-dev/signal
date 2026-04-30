@@ -116,6 +116,22 @@ Use the dashboard Push section and set:
 
 If attempted is `0`, diagnostics will explain whether there are no subscriptions, only revoked/stale subscriptions, or only legacy/unbound subscriptions.
 
+Clear stale/legacy subscriptions from the dashboard when old browser subscriptions make counts confusing. This does not delete devices, messages, or replies.
+
+## Smoke Test
+
+After starting the release daemon, run the local smoke script:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\dist\signal\scripts\smoke_release.ps1 -Port 8791 -Token dev-token
+```
+
+For read-only checks:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\dist\signal\scripts\smoke_release.ps1 -Port 8791 -Token dev-token -NoMutate
+```
+
 ## Revoke And Reset
 
 List devices:
@@ -152,6 +168,14 @@ Run public URL and push checks:
 - iPhone icon or push state looks stale: delete the Home Screen icon, clear Safari website data for the Tailscale host, reopen the phone URL, and add to Home Screen again.
 - Port is in use: start with `-StopExisting` or choose `-Port 8792`.
 - Tailscale CLI missing: start release with `-NoTailscaleServe` and configure Tailscale Serve manually.
+
+## Dogfood
+
+See `docs/DOGFOOD.md` for practical agent/script patterns.
+
+- Use `send` for nonblocking progress pings.
+- Use `ask --timeout --json` only when automation should block for a human reply.
+- Use `doctor` first when pairing or push behavior breaks.
 
 ## Security Notes
 
