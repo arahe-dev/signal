@@ -115,15 +115,22 @@ enum PairSubcommand {
     Start {
         #[arg(long)]
         name: String,
+        #[arg(long)]
+        json: bool,
     },
 }
 
 #[derive(Subcommand)]
 enum DevicesSubcommand {
-    List,
+    List {
+        #[arg(long)]
+        json: bool,
+    },
     Revoke {
         #[arg(long)]
         id: String,
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -220,16 +227,18 @@ struct AskOutput {
     reason: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 struct PairStartResponse {
     pairing_code: String,
     code_prefix: String,
     pair_url: String,
     qr_data: String,
+    #[serde(default)]
+    qr_svg: Option<String>,
     expires_in_seconds: u64,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 struct DeviceInfo {
     id: String,
     name: String,
@@ -241,12 +250,12 @@ struct DeviceInfo {
     is_active: bool,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 struct DeviceListResponse {
     devices: Vec<DeviceInfo>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 struct DeviceRevokeResponse {
     success: bool,
     message: String,
@@ -617,20 +626,38 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("Reply created: {}", reply.id);
             println!("Status: {}", reply.status);
         }
-        Commands::Pair { subcommand } => match subcommand {
-            PairSubcommand::Start { name } => {
-                let response = client.pair_start(name).await?;
-                println!("\n✓ Pairing code generated\n");
-                println!("Pairing URL:");
-                println!("{}\n", response.pair_url);
-                println!("Full Code: {}", response.pairing_code);
-                println!("Code Prefix: {}", response.code_prefix);
-                println!("Expires in: {} seconds\n", response.expires_in_seconds);
+        Commands::Pair { subcommand } => {
+            match subcommand {
+                PairSubcommand::Start { name, json } => {
+                    let response = client.pair_start(name).await?;
+                    if json {
+                        println!("{}", serde_json::to_string(&response)?);
+                        return Ok(());
+                    }
+                    println!("\n✓ Pairing code generated\n");
+                    println!("Pairing URL:");
+                    println!("{}\n", response.pair_url);
+                    if response.pair_url.contains("127.0.0.1")
+                        || response.pair_url.contains("localhost")
+                    {
+                        println!("Note: if opening on phone, replace localhost with your Tailscale URL.\n");
+                    }
+                    println!("Full Code: {}", response.pairing_code);
+                    println!("Code Prefix: {}", response.code_prefix);
+                    println!("Expires in: {} seconds\n", response.expires_in_seconds);
+                }
             }
-        },
+        }
         Commands::Devices { subcommand } => match subcommand {
-            DevicesSubcommand::List => {
+            DevicesSubcommand::List { json } => {
                 let devices = client.list_devices().await?;
+                if json {
+                    println!(
+                        "{}",
+                        serde_json::to_string(&DeviceListResponse { devices })?
+                    );
+                    return Ok(());
+                }
                 if devices.is_empty() {
                     println!("No paired devices.");
                 } else {
@@ -652,13 +679,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         if let Some(seen) = &device.last_seen_at {
                             println!("Last seen: {}", seen);
                         }
+                        if let Some(revoked) = &device.revoked_at {
+                            println!("Revoked: {}", revoked);
+                        }
                         println!();
                     }
                 }
             }
-            DevicesSubcommand::Revoke { id } => {
+            DevicesSubcommand::Revoke { id, json } => {
                 let response = client.revoke_device(id).await?;
-                println!("Device revoked: {}", response.message);
+                if json {
+                    println!("{}", serde_json::to_string(&response)?);
+                } else if response.success {
+                    println!("Device revoked: {}", response.message);
+                } else {
+                    println!("Device revoke failed: {}", response.message);
+                }
             }
         },
     }
