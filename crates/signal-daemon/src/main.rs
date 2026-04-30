@@ -119,7 +119,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     let push_router = if args.enable_web_push {
-        push::create_push_router(storage.clone(), true, vapid_config)
+        push::create_push_router(storage.clone(), true, vapid_config, args.token.clone())
     } else {
         Router::new()
     };

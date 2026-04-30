@@ -335,6 +335,7 @@ pub struct HealthResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PushSubscription {
     pub id: String,
+    pub device_id: Option<String>,
     pub endpoint: String,
     pub p256dh: String,
     pub auth: String,
@@ -365,6 +366,7 @@ impl PushSubscription {
         let id = Uuid::new_v4().to_string();
         Self {
             id,
+            device_id: None,
             endpoint,
             p256dh,
             auth,

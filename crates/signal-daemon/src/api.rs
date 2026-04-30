@@ -1,4 +1,4 @@
-use crate::app_state::AppState;
+use crate::app_state::{AppState, AuthFailure, AuthIdentity};
 use crate::html;
 use crate::web_push_sender::{
     build_ask_payload, build_message_payload, build_message_url, send_web_push_to_all_active,
@@ -89,19 +89,53 @@ fn make_error_response(
         .unwrap()
 }
 
-fn check_auth(state: &AppState, headers: &HeaderMap) -> Result<(), axum::response::Response> {
-    if state.token.is_none() {
-        return Ok(());
-    }
-
-    let token = headers
+fn token_from_headers(headers: &HeaderMap) -> Option<String> {
+    headers
         .get("X-Signal-Token")
         .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string());
+        .map(|s| s.to_string())
+        .or_else(|| {
+            headers
+                .get("Authorization")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|value| value.strip_prefix("Bearer "))
+                .map(|s| s.to_string())
+        })
+}
+
+fn auth_error_response(error: AuthFailure) -> axum::response::Response {
+    match error {
+        AuthFailure::Revoked => make_error_response(
+            axum::http::StatusCode::FORBIDDEN,
+            "device_revoked",
+            "This device has been revoked. Pair again.",
+        ),
+        AuthFailure::Invalid => make_error_response(
+            axum::http::StatusCode::UNAUTHORIZED,
+            "unauthorized",
+            "missing or invalid token",
+        ),
+    }
+}
+
+fn check_auth(
+    state: &AppState,
+    headers: &HeaderMap,
+) -> Result<AuthIdentity, axum::response::Response> {
+    if state.token.is_none() {
+        if let Some(token) = token_from_headers(headers) {
+            return state
+                .authenticate_token(&token)
+                .map_err(auth_error_response);
+        }
+        return Ok(AuthIdentity::Admin);
+    }
+
+    let token = token_from_headers(headers);
 
     match token {
-        Some(t) if state.check_token(&t) => Ok(()),
-        _ => Err(make_error_response(
+        Some(t) => state.authenticate_token(&t).map_err(auth_error_response),
+        None => Err(make_error_response(
             axum::http::StatusCode::UNAUTHORIZED,
             "unauthorized",
             "missing or invalid token",
@@ -109,19 +143,35 @@ fn check_auth(state: &AppState, headers: &HeaderMap) -> Result<(), axum::respons
     }
 }
 
-fn check_read_auth(state: &AppState, headers: &HeaderMap) -> Result<(), axum::response::Response> {
+fn check_admin_auth(state: &AppState, headers: &HeaderMap) -> Result<(), axum::response::Response> {
+    match check_auth(state, headers)? {
+        AuthIdentity::Admin => Ok(()),
+        AuthIdentity::Device { .. } => Err(make_error_response(
+            axum::http::StatusCode::FORBIDDEN,
+            "admin_required",
+            "admin token required",
+        )),
+    }
+}
+
+fn check_read_auth(
+    state: &AppState,
+    headers: &HeaderMap,
+) -> Result<AuthIdentity, axum::response::Response> {
     if !state.is_auth_required() || !state.require_token_for_read {
-        return Ok(());
+        if let Some(token) = token_from_headers(headers) {
+            return state
+                .authenticate_token(&token)
+                .map_err(auth_error_response);
+        }
+        return Ok(AuthIdentity::Admin);
     }
 
-    let token = headers
-        .get("X-Signal-Token")
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string());
+    let token = token_from_headers(headers);
 
     match token {
-        Some(t) if state.check_token(&t) => Ok(()),
-        _ => Err(make_error_response(
+        Some(t) => state.authenticate_token(&t).map_err(auth_error_response),
+        None => Err(make_error_response(
             axum::http::StatusCode::UNAUTHORIZED,
             "unauthorized",
             "missing or invalid token",
@@ -141,6 +191,7 @@ pub struct PairStartResponse {
     pub code_prefix: String,
     pub pair_url: String,
     pub qr_data: String,
+    pub qr_svg: Option<String>,
     pub expires_in_seconds: u64,
 }
 
@@ -164,7 +215,7 @@ async fn pair_start(
     headers: HeaderMap,
     axum::extract::Json(payload): axum::extract::Json<PairStartRequest>,
 ) -> Result<Json<PairStartResponse>, axum::response::Response> {
-    check_auth(&state, &headers)?;
+    check_admin_auth(&state, &headers)?;
 
     // Generate a pairing code (format: pair_<base64>)
     let full_pairing_code = signal_core::generate_pairing_code();
@@ -188,16 +239,42 @@ async fn pair_start(
             )
         })?;
 
-    // Determine the public base URL for the pairing link
+    let request_base_url = headers
+        .get("origin")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.trim_end_matches('/').to_string())
+        .or_else(|| {
+            headers
+                .get("host")
+                .and_then(|v| v.to_str().ok())
+                .map(|host| {
+                    let proto = headers
+                        .get("x-forwarded-proto")
+                        .and_then(|v| v.to_str().ok())
+                        .unwrap_or("http");
+                    format!("{}://{}", proto, host)
+                })
+        });
+
     let public_base_url = state
         .vapid_config
         .as_ref()
         .and_then(|vc| vc.public_base_url.clone())
+        .or(request_base_url)
         .unwrap_or_else(|| "http://127.0.0.1:8791".to_string());
 
     // Build pair URL with full pairing code
-    let pair_url = format!("{}/pair?code={}", public_base_url, full_pairing_code);
+    let pair_url = format!(
+        "{}/pair?code={}",
+        public_base_url.trim_end_matches('/'),
+        full_pairing_code
+    );
     let qr_data = pair_url.clone();
+    let qr_svg = qrcode::QrCode::new(qr_data.as_bytes()).ok().map(|code| {
+        code.render::<qrcode::render::svg::Color>()
+            .min_dimensions(220, 220)
+            .build()
+    });
 
     info!("Pairing code generated for device: {}", payload.device_name);
 
@@ -206,6 +283,7 @@ async fn pair_start(
         code_prefix,
         pair_url,
         qr_data,
+        qr_svg,
         expires_in_seconds: 300,
     }))
 }
@@ -318,7 +396,7 @@ async fn list_devices(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<DeviceListResponse>, axum::response::Response> {
-    check_auth(&state, &headers)?;
+    check_admin_auth(&state, &headers)?;
 
     let devices = state.storage.list_devices().map_err(|e| {
         make_error_response(
@@ -355,7 +433,7 @@ async fn revoke_device(
     headers: HeaderMap,
     Path(device_id): Path<String>,
 ) -> Result<Json<DeviceRevokeResponse>, axum::response::Response> {
-    check_auth(&state, &headers)?;
+    check_admin_auth(&state, &headers)?;
 
     state.storage.revoke_device(&device_id).map_err(|e| {
         make_error_response(
@@ -941,7 +1019,29 @@ async fn dashboard(
     State(state): State<AppState>,
     Query(query): Query<TokenQuery>,
 ) -> Result<Html<String>, axum::response::Response> {
-    check_html_read_auth(&state, query.token.as_deref())?;
+    if state.token.is_some() {
+        match query
+            .token
+            .as_deref()
+            .and_then(|token| state.authenticate_token(token).ok())
+        {
+            Some(AuthIdentity::Admin) => {}
+            Some(AuthIdentity::Device { .. }) => {
+                return Err(make_error_response(
+                    axum::http::StatusCode::FORBIDDEN,
+                    "admin_required",
+                    "Dashboard requires admin token",
+                ));
+            }
+            None => {
+                return Err(make_error_response(
+                    axum::http::StatusCode::UNAUTHORIZED,
+                    "unauthorized",
+                    "Dashboard requires ?token=<admin-token>",
+                ));
+            }
+        }
+    }
 
     let device_list = state.storage.list_devices().unwrap_or_default();
     let active_devices = device_list.iter().filter(|d| d.is_active()).count();
@@ -1106,6 +1206,13 @@ async fn dashboard(
         </div>
 
         <div class="card">
+            <h2>Push</h2>
+            <p>Send a diagnostic push to active subscriptions.</p>
+            <button id="test-push-btn" class="btn" style="margin-top: 12px;">Test Push</button>
+            <div id="push-test-status" style="margin-top: 12px;"></div>
+        </div>
+
+        <div class="card">
             <h2>Pairing</h2>
             <p>Add a new device to Signal. Each device gets a unique token.</p>
             <div style="margin-top: 16px;">
@@ -1131,6 +1238,11 @@ async fn dashboard(
             return params.get('token') || localStorage.getItem('signal_admin_token') || '';
         }}
 
+        async function parseJsonResponse(response) {{
+            const text = await response.text();
+            try {{ return text ? JSON.parse(text) : {{}}; }} catch (_) {{ return {{ message: text }}; }}
+        }}
+
         // Device revocation
         async function revokeDevice(deviceId) {{
             if (!confirm('Are you sure you want to revoke this device?')) {{
@@ -1145,14 +1257,40 @@ async fn dashboard(
                     }}
                 }});
                 
-                if (response.ok) {{
+                const body = await parseJsonResponse(response);
+                if (response.ok && body.success !== false) {{
                     alert('Device revoked successfully');
                     location.reload();
                 }} else {{
-                    alert('Failed to revoke device');
+                    alert('Failed to revoke device: ' + (body.message || response.status));
                 }}
             }} catch (error) {{
                 alert('Error: ' + error.message);
+            }}
+        }}
+
+        document.getElementById('test-push-btn')?.addEventListener('click', testPush);
+
+        async function testPush() {{
+            const statusDiv = document.getElementById('push-test-status');
+            const token = getToken();
+            if (!token) {{
+                statusDiv.innerHTML = '<div style="color:#c62828;">Missing admin token.</div>';
+                return;
+            }}
+            statusDiv.innerHTML = '<div style="color:#007aff;">Sending test push...</div>';
+            try {{
+                const response = await fetch('/api/push/test', {{
+                    method: 'POST',
+                    headers: {{ 'X-Signal-Token': token }}
+                }});
+                const body = await parseJsonResponse(response);
+                if (!response.ok || body.success === false) {{
+                    throw new Error(body.message || ('HTTP ' + response.status));
+                }}
+                statusDiv.innerHTML = '<div style="color:#2e7d32;">' + (body.message || 'Push sent') + '</div>';
+            }} catch (error) {{
+                statusDiv.innerHTML = '<div style="color:#c62828;">Push failed: ' + error.message + '</div>';
             }}
         }}
 
@@ -1195,7 +1333,17 @@ async fn dashboard(
         }}
 
         function displayPairingCode(statusDiv, data) {{
-            const pairingUrl = data.pair_url;
+            let pairingUrl = data.pair_url || new URL('/pair?code=' + encodeURIComponent(data.pairing_code), window.location.origin).toString();
+            try {{
+                const parsed = new URL(pairingUrl);
+                if ((parsed.hostname === '127.0.0.1' || parsed.hostname === 'localhost') &&
+                    window.location.hostname !== '127.0.0.1' && window.location.hostname !== 'localhost') {{
+                    pairingUrl = new URL('/pair?code=' + encodeURIComponent(data.pairing_code), window.location.origin).toString();
+                }}
+            }} catch (_) {{
+                pairingUrl = new URL('/pair?code=' + encodeURIComponent(data.pairing_code), window.location.origin).toString();
+            }}
+            const qrSvg = data.qr_svg || '';
             
             const expiresIn = data.expires_in_seconds || 300;
             const minutesLeft = Math.floor(expiresIn / 60);
@@ -1216,6 +1364,7 @@ async fn dashboard(
                     </div>
 
                     <p style="font-size: 13px; margin-bottom: 8px; color: #1d1d1f;"><strong>Mobile Device:</strong></p>
+                    ${{qrSvg ? `<div style="background:white;display:inline-block;padding:12px;border-radius:8px;margin-bottom:12px;">${{qrSvg}}</div>` : ''}}
                     <a href="${{pairingUrl}}" target="_blank" style="display: inline-block; padding: 12px 16px; background: #007aff; color: white; text-decoration: none; border-radius: 8px; margin-bottom: 12px; font-size: 13px;">
                         Open Pairing Link →
                     </a>
@@ -1223,6 +1372,7 @@ async fn dashboard(
                     <p style="font-size: 12px; color: #6e6e73; margin-top: 12px;">
                         <strong>Or share this URL:</strong><br>
                         <code style="font-size: 11px; word-break: break-all; display: block; background: #fff; padding: 8px; border-radius: 4px; margin-top: 4px;">${{pairingUrl}}</code>
+                        <button onclick="copyToClipboard('${{pairingUrl}}')" class="btn" style="margin-top: 8px;">Copy Pairing URL</button>
                     </p>
 
                     <button onclick="resetPairing()" class="btn" style="background: #f5f5f7; color: #007aff; border: 1px solid #e5e5ea; margin-top: 12px;">
@@ -1499,6 +1649,7 @@ pub fn create_html_router(
 #[derive(Debug, Deserialize)]
 pub struct TokenQuery {
     token: Option<String>,
+    device_token: Option<String>,
 }
 
 fn check_html_read_auth(
@@ -1510,7 +1661,21 @@ fn check_html_read_auth(
     }
 
     match token_from_query {
-        Some(t) if state.check_token(t) => Ok(()),
+        Some(t) => state
+            .authenticate_token(t)
+            .map(|_| ())
+            .map_err(|error| match error {
+                AuthFailure::Revoked => make_error_response(
+                    axum::http::StatusCode::FORBIDDEN,
+                    "device_revoked",
+                    "This device has been revoked. Pair again.",
+                ),
+                AuthFailure::Invalid => make_error_response(
+                    axum::http::StatusCode::UNAUTHORIZED,
+                    "unauthorized",
+                    "missing or invalid token",
+                ),
+            }),
         _ => {
             let body = r#"<!DOCTYPE html><html><head><title>401 Unauthorized</title></head><body style="font-family:system-ui;padding:40px;text-align:center;"><h1>401 Unauthorized</h1><p>Token required. Add ?token=dev-token to URL.</p><p><a href="/app?token=dev-token">Open Signal app with dev token</a></p></body></html>"#;
             Err(axum::response::Response::builder()
@@ -1526,13 +1691,14 @@ async fn inbox_page(
     State(state): State<AppState>,
     Query(query): Query<TokenQuery>,
 ) -> Result<Html<String>, axum::response::Response> {
-    check_html_read_auth(&state, query.token.as_deref())?;
+    let query_token = query.device_token.as_deref().or(query.token.as_deref());
+    check_html_read_auth(&state, query_token)?;
 
     let storage = state.storage.as_ref();
     let messages = storage
         .list_messages(Some(50), None, None, None)
         .unwrap_or_default();
-    let token = query.token.or(state.token.clone());
+    let token = query.device_token.or(query.token).or(state.token.clone());
     Ok(Html(html::render_inbox(&messages, token.as_deref())))
 }
 
@@ -1541,7 +1707,8 @@ async fn message_detail_page(
     Path(id): Path<String>,
     Query(query): Query<TokenQuery>,
 ) -> Result<Html<String>, axum::response::Response> {
-    check_html_read_auth(&state, query.token.as_deref())?;
+    let query_token = query.device_token.as_deref().or(query.token.as_deref());
+    check_html_read_auth(&state, query_token)?;
 
     let storage = state.storage.as_ref();
 
@@ -1553,7 +1720,7 @@ async fn message_detail_page(
     })?;
 
     let replies = storage.get_replies_for_message(&id).unwrap_or_default();
-    let token = query.token.or(state.token.clone());
+    let token = query.device_token.or(query.token).or(state.token.clone());
 
     Ok(Html(html::render_message_detail(
         &message,
@@ -1567,17 +1734,17 @@ async fn reply_form_handler(
     Path(message_id): Path<String>,
     axum::extract::Form(form): axum::extract::Form<ReplyFormDataWithToken>,
 ) -> Result<impl IntoResponse, axum::response::Response> {
-    if let Some(ref expected_token) = state.token {
-        match &form.token {
-            Some(t) if t == expected_token => {}
-            _ => {
-                return Err(make_error_response(
-                    axum::http::StatusCode::UNAUTHORIZED,
-                    "unauthorized",
-                    "missing or invalid token",
-                ));
-            }
-        }
+    if state.token.is_some() {
+        let Some(token) = form.token.as_deref() else {
+            return Err(make_error_response(
+                axum::http::StatusCode::UNAUTHORIZED,
+                "unauthorized",
+                "missing or invalid token",
+            ));
+        };
+        state
+            .authenticate_token(token)
+            .map_err(auth_error_response)?;
     }
 
     let storage = state.storage.as_ref();

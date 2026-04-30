@@ -97,6 +97,7 @@ impl Storage {
         conn.execute(
             "CREATE TABLE IF NOT EXISTS push_subscriptions (
                 id TEXT PRIMARY KEY,
+                device_id TEXT,
                 endpoint TEXT NOT NULL,
                 p256dh TEXT NOT NULL,
                 auth TEXT NOT NULL,
@@ -143,6 +144,10 @@ impl Storage {
             "ALTER TABLE push_subscriptions ADD COLUMN vapid_public_key_hash TEXT",
             [],
         );
+        let _ = conn.execute(
+            "ALTER TABLE push_subscriptions ADD COLUMN device_id TEXT",
+            [],
+        );
         for migration in [
             "ALTER TABLE messages ADD COLUMN expires_at TEXT",
             "ALTER TABLE messages ADD COLUMN priority TEXT",
@@ -155,6 +160,10 @@ impl Storage {
 
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_push_subscriptions_endpoint ON push_subscriptions(endpoint)",
+            [],
+        )?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_push_subscriptions_device_id ON push_subscriptions(device_id)",
             [],
         )?;
 
@@ -593,16 +602,20 @@ impl Storage {
     ) -> Result<(), StorageError> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "INSERT INTO push_subscriptions (id, endpoint, p256dh, auth, user_agent, created_at, status, vapid_public_key_hash)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+            "INSERT INTO push_subscriptions (id, device_id, endpoint, p256dh, auth, user_agent, created_at, status, vapid_public_key_hash)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
              ON CONFLICT(id) DO UPDATE SET
+                device_id = excluded.device_id,
+                endpoint = excluded.endpoint,
                 p256dh = excluded.p256dh,
                 auth = excluded.auth,
                 user_agent = excluded.user_agent,
+                status = excluded.status,
                 vapid_public_key_hash = excluded.vapid_public_key_hash,
                 last_error = NULL",
             params![
                 subscription.id,
+                subscription.device_id,
                 subscription.endpoint,
                 subscription.p256dh,
                 subscription.auth,
@@ -619,19 +632,22 @@ impl Storage {
     pub fn list_active_push_subscriptions(&self) -> Result<Vec<PushSubscription>, StorageError> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, endpoint, p256dh, auth, user_agent, created_at, last_success_at, last_error, status, vapid_public_key_hash
-             FROM push_subscriptions WHERE status = 'active'",
+            "SELECT s.id, s.device_id, s.endpoint, s.p256dh, s.auth, s.user_agent, s.created_at, s.last_success_at, s.last_error, s.status, s.vapid_public_key_hash
+             FROM push_subscriptions s
+             LEFT JOIN devices d ON s.device_id = d.id
+             WHERE s.status = 'active' AND (s.device_id IS NULL OR d.revoked_at IS NULL)",
         )?;
 
         let rows = stmt.query_map([], |row| {
-            let created_at_str: String = row.get(5)?;
-            let last_success_at_str: Option<String> = row.get(6)?;
+            let created_at_str: String = row.get(6)?;
+            let last_success_at_str: Option<String> = row.get(7)?;
             Ok(PushSubscription {
                 id: row.get(0)?,
-                endpoint: row.get(1)?,
-                p256dh: row.get(2)?,
-                auth: row.get(3)?,
-                user_agent: row.get(4)?,
+                device_id: row.get(1)?,
+                endpoint: row.get(2)?,
+                p256dh: row.get(3)?,
+                auth: row.get(4)?,
+                user_agent: row.get(5)?,
                 created_at: chrono::DateTime::parse_from_rfc3339(&created_at_str)
                     .map(|dt| dt.with_timezone(&chrono::Utc))
                     .unwrap_or_else(|_| chrono::Utc::now()),
@@ -640,9 +656,9 @@ impl Storage {
                         .map(|dt| dt.with_timezone(&chrono::Utc))
                         .ok()
                 }),
-                last_error: row.get(7)?,
-                status: row.get(8)?,
-                vapid_public_key_hash: row.get(9)?,
+                last_error: row.get(8)?,
+                status: row.get(9)?,
+                vapid_public_key_hash: row.get(10)?,
             })
         })?;
 
@@ -818,7 +834,7 @@ impl Storage {
         let conn = self.conn.lock().unwrap();
         let now = chrono::Utc::now().to_rfc3339();
         conn.execute(
-            "UPDATE devices SET last_seen_at = ?1 WHERE id = ?2",
+            "UPDATE devices SET last_seen_at = ?1 WHERE id = ?2 AND revoked_at IS NULL",
             params![now, id],
         )?;
         Ok(())
@@ -830,6 +846,22 @@ impl Storage {
         conn.execute(
             "UPDATE devices SET revoked_at = ?1 WHERE id = ?2",
             params![now, id],
+        )?;
+        conn.execute(
+            "UPDATE push_subscriptions SET status = 'revoked', last_error = 'device_revoked' WHERE device_id = ?1",
+            params![id],
+        )?;
+        Ok(())
+    }
+
+    pub fn mark_push_subscriptions_revoked_for_device(
+        &self,
+        device_id: &str,
+    ) -> Result<(), StorageError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE push_subscriptions SET status = 'revoked', last_error = 'device_revoked' WHERE device_id = ?1",
+            params![device_id],
         )?;
         Ok(())
     }
@@ -907,7 +939,7 @@ impl Storage {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::{Message, PermissionLevel};
+    use crate::models::{Device, Message, PairingCode, PermissionLevel, PushSubscription};
     use tempfile::NamedTempFile;
 
     fn make_storage() -> Storage {
@@ -1102,5 +1134,49 @@ mod tests {
         let consumed = storage.get_reply(&reply.id).unwrap();
         assert_eq!(consumed.status, ReplyStatus::Consumed);
         assert!(consumed.consumed_at.is_some());
+    }
+
+    #[test]
+    fn pair_code_is_single_use_and_stores_hash_only() {
+        let storage = make_storage();
+        let raw_code = crate::generate_pairing_code();
+        let code_hash = crate::hash_token(&raw_code);
+        let pairing = PairingCode::new(code_hash.clone(), crate::get_token_prefix(&raw_code), 300);
+        storage.create_pairing_code(&pairing).unwrap();
+
+        let stored = storage.get_pairing_code(&code_hash).unwrap();
+        assert_eq!(stored.code_hash, code_hash);
+        assert_ne!(stored.code_hash, raw_code);
+        assert!(stored.is_valid());
+
+        storage.mark_pairing_code_used(&code_hash).unwrap();
+        assert!(!storage.get_pairing_code(&code_hash).unwrap().is_valid());
+    }
+
+    #[test]
+    fn revoked_device_push_subscriptions_are_skipped() {
+        let storage = make_storage();
+        let raw_token = crate::generate_device_token();
+        let device = Device::new(
+            "device-1".to_string(),
+            "phone".to_string(),
+            "phone".to_string(),
+            crate::hash_token(&raw_token),
+            crate::get_token_prefix(&raw_token),
+        );
+        storage.create_device(&device).unwrap();
+
+        let mut sub = PushSubscription::new(
+            "https://web.push.apple.com/test".to_string(),
+            "p256dh".to_string(),
+            "auth".to_string(),
+            None,
+        );
+        sub.device_id = Some(device.id.clone());
+        storage.upsert_push_subscription(&sub).unwrap();
+        assert_eq!(storage.list_active_push_subscriptions().unwrap().len(), 1);
+
+        storage.revoke_device(&device.id).unwrap();
+        assert_eq!(storage.list_active_push_subscriptions().unwrap().len(), 0);
     }
 }

@@ -166,199 +166,197 @@
     </div>
 
     <script>
-        // Get token from localStorage first, then URL parameter, then use empty string
-        let token = localStorage.getItem('signal_token') || new URLSearchParams(window.location.search).get('token') || '';
-        
-        // If token came from URL parameter, save it to localStorage
-        if (new URLSearchParams(window.location.search).get('token') && !localStorage.getItem('signal_token')) {
-            localStorage.setItem('signal_token', token);
-            // Clean up URL parameter
-            window.history.replaceState({}, document.title, window.location.pathname);
-        }
-
         const enableBtn = document.getElementById('enable-notifications');
         const statusDiv = document.getElementById('notification-status');
         const messageList = document.getElementById('message-list');
         const pushStatus = document.getElementById('push-status');
         document.getElementById('refresh-inbox').addEventListener('click', loadInbox);
 
-        // Add device management UI (placeholder for Phase B)
-        function addDeviceManagementUI() {
-            if (!token) {
-                // Show pairing UI if no token
-                const pairingCard = document.createElement('div');
-                pairingCard.className = 'card';
-                pairingCard.innerHTML = `
-                    <h2>Device Pairing</h2>
-                    <p>No device token found. Pair this device to send messages.</p>
-                    <button id="pair-device" class="btn">Start Pairing</button>
-                    <div id="pairing-status"></div>
-                `;
-                document.querySelector('.container').insertBefore(pairingCard, document.querySelector('#notification-card'));
-                
-                document.getElementById('pair-device')?.addEventListener('click', startPairing);
+        function getSignalToken() {
+            const params = new URLSearchParams(location.search);
+            const urlDeviceToken = params.get('device_token');
+            const urlToken = params.get('token');
+            const stored = localStorage.getItem('signal_device_token') || localStorage.getItem('signal_token');
+            const token = urlDeviceToken || urlToken || stored || '';
+
+            if (urlDeviceToken) localStorage.setItem('signal_device_token', urlDeviceToken);
+            if (urlToken && !stored) localStorage.setItem('signal_token', urlToken);
+
+            if ((urlDeviceToken || urlToken) && history.replaceState) {
+                history.replaceState({}, document.title, location.pathname);
             }
+            return token;
         }
 
-        async function startPairing() {
-            // Placeholder - will be implemented in Phase B with QR code generation
-            console.log('Pairing started');
+        let token = getSignalToken();
+
+        function authHeaders(extra) {
+            const headers = Object.assign({}, extra || {});
+            token = getSignalToken();
+            if (token) headers['X-Signal-Token'] = token;
+            return headers;
         }
 
-        enableBtn.addEventListener('click', async () => {
-            if (!('Notification' in window)) {
-                showStatus('Notifications not supported in this browser', 'error');
-                return;
+        function showStatus(message, type) {
+            statusDiv.innerHTML = '<div class="status status-' + type + '">' + escapeHtml(message) + '</div>';
+        }
+
+        function showPairAgain(message) {
+            localStorage.removeItem('signal_device_token');
+            token = getSignalToken();
+            const text = message || 'Device revoked or not paired. Pair this device again from the dashboard.';
+            messageList.innerHTML = '<div class="status status-error">' + escapeHtml(text) + '</div>';
+            pushStatus.textContent = 'Push: pairing required';
+            showStatus(text, 'error');
+        }
+
+        async function parseJsonResponse(response) {
+            const text = await response.text();
+            try { return text ? JSON.parse(text) : {}; } catch (_) { return { message: text }; }
+        }
+
+        async function guardedFetch(url, options) {
+            const response = await fetch(url, options || {});
+            if (response.status === 401 || response.status === 403) {
+                const body = await parseJsonResponse(response);
+                if (body.error === 'device_revoked') {
+                    showPairAgain(body.message);
+                    throw new Error('device_revoked: ' + body.message);
+                }
             }
+            return response;
+        }
 
-            if (Notification.permission === 'granted') {
-                showStatus('Notifications already enabled. Refreshing push subscription...', 'info');
-                await subscribeToPush();
-                return;
-            }
+        enableBtn.addEventListener('click', enableNotifications);
 
-            if (Notification.permission === 'denied') {
-                showStatus('Notifications blocked. Please enable in browser settings.', 'error');
-                return;
-            }
-
-            const permission = await Notification.requestPermission();
-
-            if (permission === 'granted') {
-                showStatus('Permission granted! Subscribing to push...', 'info');
-                await subscribeToPush();
-            } else {
-                showStatus('Permission denied', 'error');
-            }
-        });
-
-        async function subscribeToPush() {
+        async function enableNotifications() {
+            enableBtn.disabled = true;
+            let stage = 'starting';
             try {
-                const registration = await navigator.serviceWorker.register('/service-worker.js');
-                console.log('Service Worker registered:', registration);
+                token = getSignalToken();
+                if (!token) throw new Error('pairing_required: open /pair from the dashboard or use /app?token=dev-token');
 
-                const keyResponse = await fetch('/api/push/vapid-public-key');
-                const keyResult = await keyResponse.json();
-                if (!keyResult.public_key) {
-                    throw new Error('VAPID public key is not configured');
+                stage = 'capability_check';
+                if (!('serviceWorker' in navigator)) throw new Error('service_worker_unsupported');
+                if (!('PushManager' in window)) throw new Error('push_manager_unsupported');
+                if (!('Notification' in window)) throw new Error('notifications_unsupported');
+
+                stage = 'service_worker_register_failed';
+                showStatus('Registering service worker...', 'info');
+                const registration = await navigator.serviceWorker.register('/service-worker.js', { scope: '/' });
+                await navigator.serviceWorker.ready;
+
+                stage = 'notification_permission_denied';
+                const permission = Notification.permission === 'granted'
+                    ? 'granted'
+                    : await Notification.requestPermission();
+                if (permission !== 'granted') throw new Error('notification_permission_denied');
+
+                stage = 'vapid_fetch_failed';
+                showStatus('Fetching VAPID public key...', 'info');
+                const keyResponse = await guardedFetch('/api/push/vapid-public-key', {
+                    headers: authHeaders()
+                });
+                const keyBody = await parseJsonResponse(keyResponse);
+                if (!keyResponse.ok) throw new Error('vapid_fetch_failed: ' + (keyBody.message || keyResponse.status));
+
+                stage = 'vapid_invalid_key';
+                const publicKey = keyBody.publicKey || keyBody.public_key;
+                if (!publicKey || typeof publicKey !== 'string') throw new Error('vapid_invalid_key: missing publicKey');
+                const applicationServerKey = urlBase64ToUint8Array(publicKey);
+                if (applicationServerKey.length !== 65 || applicationServerKey[0] !== 4) {
+                    throw new Error('vapid_invalid_key: decoded length=' + applicationServerKey.length + ', firstByte=' + applicationServerKey[0]);
                 }
 
-                const applicationServerKey = urlBase64ToUint8Array(keyResult.public_key);
-                const subscription = await subscribeWithCurrentVapidKey(registration, applicationServerKey);
+                stage = 'push_subscribe_failed';
+                showStatus('Creating browser push subscription...', 'info');
+                let subscription = await registration.pushManager.getSubscription();
+                if (!subscription) {
+                    subscription = await registration.pushManager.subscribe({
+                        userVisibleOnly: true,
+                        applicationServerKey
+                    });
+                }
 
-                console.log('Push subscription:', subscription);
                 const subscriptionJson = subscription.toJSON();
-                if (!subscriptionJson.keys?.p256dh || !subscriptionJson.keys?.auth) {
-                    throw new Error('Push subscription keys are missing');
+                if (!subscriptionJson.endpoint || !subscriptionJson.keys?.p256dh || !subscriptionJson.keys?.auth) {
+                    throw new Error('push_subscribe_failed: subscription missing endpoint or keys');
                 }
 
-                const response = await fetch('/api/push/subscribe', {
+                stage = 'push_subscription_save_failed';
+                showStatus('Saving push subscription...', 'info');
+                const saveResponse = await guardedFetch('/api/push/subscribe', {
                     method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                        'X-Signal-Token': token || ''
-                    },
+                    headers: authHeaders({ 'Content-Type': 'application/json' }),
                     body: JSON.stringify({
                         endpoint: subscriptionJson.endpoint,
+                        expirationTime: subscriptionJson.expirationTime || null,
                         keys: {
                             p256dh: subscriptionJson.keys.p256dh,
                             auth: subscriptionJson.keys.auth
                         }
                     })
                 });
-
-                const result = await response.json();
-
-                if (result.success) {
-                    showStatus('Subscribed to push notifications!', 'success');
-                } else {
-                    showStatus('Subscription failed: ' + (result.message || 'unknown'), 'error');
+                const saveBody = await parseJsonResponse(saveResponse);
+                if (!saveResponse.ok || saveBody.success === false) {
+                    throw new Error('push_subscription_save_failed: ' + (saveBody.message || saveResponse.status));
                 }
+
+                showStatus('Push notifications enabled. Key length=' + applicationServerKey.length + ', firstByte=' + applicationServerKey[0], 'success');
+                await loadInbox();
             } catch (error) {
-                console.error('Push subscription error:', error);
-                showStatus('Error: ' + error.message, 'error');
+                console.error('Notification enable failed at stage:', stage, error);
+                showStatus(stage + ': ' + (error.message || error), 'error');
+            } finally {
+                enableBtn.disabled = false;
             }
-        }
-
-        async function subscribeWithCurrentVapidKey(registration, applicationServerKey) {
-            const existingSubscription = await registration.pushManager.getSubscription();
-            if (existingSubscription) {
-                console.log('Removing existing push subscription before subscribing with current VAPID key');
-                await existingSubscription.unsubscribe();
-            }
-
-            try {
-                return await registration.pushManager.subscribe({
-                    userVisibleOnly: true,
-                    applicationServerKey
-                });
-            } catch (error) {
-                if (!String(error.message || error).toLowerCase().includes('applicationserverkey')) {
-                    throw error;
-                }
-
-                const staleSubscription = await registration.pushManager.getSubscription();
-                if (staleSubscription) {
-                    console.log('Retrying after removing stale push subscription with mismatched VAPID key');
-                    await staleSubscription.unsubscribe();
-                }
-
-                return await registration.pushManager.subscribe({
-                    userVisibleOnly: true,
-                    applicationServerKey
-                });
-            }
-        }
-
-        function showStatus(message, type) {
-            statusDiv.innerHTML = '<div class="status status-' + type + '">' + message + '</div>';
         }
 
         function urlBase64ToUint8Array(base64String) {
             const padding = '='.repeat((4 - base64String.length % 4) % 4);
-            const base64 = (base64String + padding)
-                .replace(/-/g, '+')
-                .replace(/_/g, '/');
-
+            const base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
             const rawData = window.atob(base64);
             const outputArray = new Uint8Array(rawData.length);
-
-            for (let i = 0; i < rawData.length; ++i) {
-                outputArray[i] = rawData.charCodeAt(i);
-            }
+            for (let i = 0; i < rawData.length; ++i) outputArray[i] = rawData.charCodeAt(i);
             return outputArray;
-        }
-
-        if ('serviceWorker' in navigator) {
-            navigator.serviceWorker.ready.then(() => {
-                console.log('Service Worker ready');
-            });
         }
 
         async function loadInbox() {
             try {
-                const headers = token ? { 'X-Signal-Token': token } : {};
+                token = getSignalToken();
+                if (!token) {
+                    showPairAgain('Pair this device or open /app?token=dev-token.');
+                    return;
+                }
+
                 const [messagesResponse, pushResponse] = await Promise.all([
-                    fetch('/api/messages?limit=25', { headers }),
-                    fetch('/api/push/status', { headers })
+                    guardedFetch('/api/messages?limit=25', { headers: authHeaders() }),
+                    guardedFetch('/api/push/status', { headers: authHeaders() })
                 ]);
+
                 if (pushResponse.ok) {
                     const status = await pushResponse.json();
                     pushStatus.textContent = 'Push: ' + (status.web_push_enabled ? 'enabled' : 'disabled') +
                         ', subscriptions: ' + status.subscriptions_count;
+                } else {
+                    pushStatus.textContent = 'Push: status unavailable (' + pushResponse.status + ')';
                 }
+
                 if (!messagesResponse.ok) {
-                    messageList.innerHTML = '<div class="status status-error">Unable to load inbox. Check token.</div>';
+                    const body = await parseJsonResponse(messagesResponse);
+                    messageList.innerHTML = '<div class="status status-error">Unable to load inbox: ' + escapeHtml(body.message || messagesResponse.status) + '</div>';
                     return;
                 }
+
                 const messages = await messagesResponse.json();
                 const activeMessages = messages.filter((message) => message.status !== 'archived');
                 if (activeMessages.length === 0) {
                     messageList.innerHTML = '<div class="note">No active messages.</div>';
                     return;
                 }
+
                 messageList.innerHTML = activeMessages.map((message) => {
-                    const href = '/message/' + encodeURIComponent(message.id) + (token ? '?token=' + encodeURIComponent(token) : '');
+                    const href = '/message/' + encodeURIComponent(message.id) + '?device_token=' + encodeURIComponent(token);
                     const meta = [message.source, message.project, message.agent_id].filter(Boolean).join(' / ');
                     return '<a class="message-link" href="' + href + '">' +
                         '<div class="message-row"><span class="message-title">' + escapeHtml(message.title) + '</span>' +
@@ -368,7 +366,9 @@
                         '</a>';
                 }).join('');
             } catch (error) {
-                messageList.innerHTML = '<div class="status status-error">Inbox error: ' + escapeHtml(error.message) + '</div>';
+                if (!String(error.message || error).includes('device_revoked')) {
+                    messageList.innerHTML = '<div class="status status-error">Inbox error: ' + escapeHtml(error.message || error) + '</div>';
+                }
             }
         }
 
@@ -381,8 +381,6 @@
                 .replace(/'/g, '&#039;');
         }
 
-        // Initialize UI
-        addDeviceManagementUI();
         loadInbox();
     </script>
 </body>

@@ -2,6 +2,18 @@ use crate::web_push_sender::VapidConfig;
 use signal_core::Storage;
 use std::sync::Arc;
 
+#[derive(Clone, Debug, PartialEq)]
+pub enum AuthIdentity {
+    Admin,
+    Device { device_id: String },
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum AuthFailure {
+    Invalid,
+    Revoked,
+}
+
 #[derive(Clone)]
 pub struct AppState {
     pub storage: Arc<Storage>,
@@ -32,36 +44,79 @@ impl AppState {
         }
     }
 
-    pub fn check_token(&self, token: &str) -> bool {
-        // If no admin token is required, accept any valid device token
-        if self.token.is_none() {
-            return self.check_device_token(token);
-        }
-
-        // Check against hardcoded admin token first
+    pub fn authenticate_token(&self, token: &str) -> Result<AuthIdentity, AuthFailure> {
         if let Some(expected) = &self.token {
             if token == expected {
-                return true;
+                return Ok(AuthIdentity::Admin);
             }
         }
 
-        // Check against device tokens as fallback
-        self.check_device_token(token)
-    }
-
-    pub fn check_device_token(&self, token: &str) -> bool {
-        // Check against device tokens
-        if let Ok(device) = self
+        let device = self
             .storage
             .get_device_by_token_hash(&signal_core::hash_token(token))
-        {
-            // Device must be active (not revoked)
-            return device.is_active();
+            .map_err(|_| AuthFailure::Invalid)?;
+
+        if !device.is_active() {
+            return Err(AuthFailure::Revoked);
         }
-        false
+
+        let _ = self.storage.update_device_last_seen(&device.id);
+        Ok(AuthIdentity::Device {
+            device_id: device.id,
+        })
+    }
+
+    pub fn check_token(&self, token: &str) -> bool {
+        self.authenticate_token(token).is_ok()
     }
 
     pub fn is_auth_required(&self) -> bool {
         self.token.is_some()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{AppState, AuthFailure, AuthIdentity};
+    use signal_core::{generate_device_token, hash_token, models::Device, Storage};
+    use std::sync::Arc;
+    use tempfile::NamedTempFile;
+
+    fn state_with_device() -> (AppState, String, String) {
+        let file = NamedTempFile::new().unwrap();
+        let storage = Arc::new(Storage::new(file.path()).unwrap());
+        let token = generate_device_token();
+        let device = Device::new(
+            "device-1".to_string(),
+            "phone".to_string(),
+            "phone".to_string(),
+            hash_token(&token),
+            "sig_dev_test".to_string(),
+        );
+        storage.create_device(&device).unwrap();
+        (
+            AppState::new(storage, Some("dev-token".to_string()), true),
+            token,
+            device.id,
+        )
+    }
+
+    #[test]
+    fn active_device_token_authenticates() {
+        let (state, token, device_id) = state_with_device();
+        assert_eq!(
+            state.authenticate_token(&token).unwrap(),
+            AuthIdentity::Device { device_id }
+        );
+    }
+
+    #[test]
+    fn revoked_device_token_fails_auth() {
+        let (state, token, device_id) = state_with_device();
+        state.storage.revoke_device(&device_id).unwrap();
+        assert_eq!(
+            state.authenticate_token(&token).unwrap_err(),
+            AuthFailure::Revoked
+        );
     }
 }
