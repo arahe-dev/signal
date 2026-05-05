@@ -438,6 +438,11 @@ pub struct PairCompleteRequest {
     pub pairing_code: String,
     pub device_name: String,
     pub device_kind: String,
+    pub mode: Option<String>,
+    #[serde(default)]
+    pub requested_capabilities: Vec<String>,
+    #[serde(default)]
+    pub experimental_confirmed: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -445,6 +450,270 @@ pub struct PairCompleteResponse {
     pub device_id: String,
     pub device_token: String,
     pub device_name: String,
+    pub mode: String,
+    pub capabilities: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DeviceMeResponse {
+    pub identity: String,
+    pub device: Option<DeviceInfo>,
+    pub mode: String,
+    pub capabilities: Vec<String>,
+    pub experimental_actions_enabled: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateCapabilitiesRequest {
+    #[serde(default)]
+    pub disable: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct UpdateCapabilitiesResponse {
+    pub capabilities: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CreateActionRequest {
+    pub kind: String,
+    pub agent_id: Option<String>,
+    pub project: Option<String>,
+    pub profile_id: Option<String>,
+    pub body: Option<String>,
+    pub risk: Option<String>,
+    #[serde(default)]
+    pub payload: Value,
+    pub ttl_seconds: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ListActionsQuery {
+    pub status: Option<String>,
+    pub agent_id: Option<String>,
+    pub project: Option<String>,
+    pub limit: Option<i64>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CreateActionResponse {
+    pub action: ActionIntent,
+    pub message: Message,
+    pub approval: Option<ActionApproval>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub approval_nonce: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ClaimActionRequest {
+    pub worker_id: String,
+    pub policy_hash: Option<String>,
+    pub lease_seconds: Option<u64>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ClaimActionResponse {
+    pub action: ActionIntent,
+    pub run: ActionRun,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CompleteActionRequest {
+    pub run_id: String,
+    pub exit_code: Option<i64>,
+    pub output_summary: Option<String>,
+    pub error: Option<Value>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ListApprovalsQuery {
+    pub status: Option<String>,
+    pub limit: Option<i64>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ApprovalDecisionRequest {
+    pub decision: String,
+    pub nonce: Option<String>,
+}
+
+const STANDARD_DEVICE_CAPABILITIES: &[&str] = &[
+    "messages.read",
+    "messages.reply",
+    "ask.respond",
+    "events.read",
+    "artifacts.read",
+    "push.subscribe",
+];
+
+const EXPERIMENTAL_DEVICE_CAPABILITIES: &[&str] = &[
+    "ask.create",
+    "agent.wake",
+    "artifact.request",
+    "approval.decide",
+    "profile.run.low",
+];
+
+fn is_supported_capability(capability: &str) -> bool {
+    STANDARD_DEVICE_CAPABILITIES.contains(&capability)
+        || EXPERIMENTAL_DEVICE_CAPABILITIES.contains(&capability)
+}
+
+fn default_capabilities_for_mode(mode: &str, requested: &[String]) -> Vec<String> {
+    let mut capabilities: Vec<String> = STANDARD_DEVICE_CAPABILITIES
+        .iter()
+        .map(|value| value.to_string())
+        .collect();
+
+    if mode == "experimental" {
+        let experimental = if requested.is_empty() {
+            EXPERIMENTAL_DEVICE_CAPABILITIES
+                .iter()
+                .map(|value| value.to_string())
+                .collect::<Vec<_>>()
+        } else {
+            requested
+                .iter()
+                .filter(|capability| {
+                    EXPERIMENTAL_DEVICE_CAPABILITIES.contains(&capability.as_str())
+                })
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        for capability in experimental {
+            if !capabilities.contains(&capability) {
+                capabilities.push(capability);
+            }
+        }
+    }
+
+    capabilities
+}
+
+fn device_info_from_device(device: Device) -> DeviceInfo {
+    let is_active = device.is_active();
+    DeviceInfo {
+        id: device.id,
+        name: device.name,
+        kind: device.kind,
+        token_prefix: device.token_prefix,
+        paired_at: device.paired_at.to_rfc3339(),
+        last_seen_at: device.last_seen_at.map(|dt| dt.to_rfc3339()),
+        revoked_at: device.revoked_at.map(|dt| dt.to_rfc3339()),
+        is_active,
+    }
+}
+
+fn normalize_pair_mode(mode: Option<&str>, experimental_confirmed: bool) -> String {
+    if experimental_confirmed
+        && mode
+            .map(|value| value.eq_ignore_ascii_case("experimental"))
+            .unwrap_or(false)
+    {
+        "experimental".to_string()
+    } else {
+        "standard".to_string()
+    }
+}
+
+fn extract_device_mode(metadata_json: Option<&str>) -> String {
+    metadata_json
+        .and_then(|metadata| serde_json::from_str::<Value>(metadata).ok())
+        .and_then(|metadata| {
+            metadata
+                .get("mode")
+                .and_then(|value| value.as_str())
+                .map(|value| value.to_string())
+        })
+        .unwrap_or_else(|| "standard".to_string())
+}
+
+fn action_requirement(
+    kind: &str,
+    profile_id: Option<&str>,
+    requested_risk: Option<&str>,
+) -> Option<(String, String)> {
+    match kind {
+        "wake_agent" | "wake" => Some(("agent.wake".to_string(), "low".to_string())),
+        "file_request" | "request_file" => {
+            Some(("artifact.request".to_string(), "medium".to_string()))
+        }
+        "profile_run" | "run_profile" => {
+            let risk = requested_risk.unwrap_or("low").to_ascii_lowercase();
+            let risk = match risk.as_str() {
+                "low" | "medium" | "high" | "lab" => risk,
+                _ => "low".to_string(),
+            };
+            let capability = match risk.as_str() {
+                "medium" => "profile.run.medium",
+                "high" => "profile.run.high",
+                "lab" => "lab.raw_command",
+                _ => {
+                    if profile_id
+                        .unwrap_or_default()
+                        .eq_ignore_ascii_case("shutdown_pc")
+                    {
+                        "power.shutdown"
+                    } else {
+                        "profile.run.low"
+                    }
+                }
+            };
+            Some((capability.to_string(), risk))
+        }
+        _ => None,
+    }
+}
+
+fn requires_approval(risk: &str) -> bool {
+    matches!(risk, "medium" | "high" | "lab")
+}
+
+fn generate_approval_nonce() -> String {
+    format!("{:06}", Uuid::new_v4().as_u128() % 1_000_000)
+}
+
+fn require_experimental_enabled(state: &AppState) -> Result<(), axum::response::Response> {
+    if state.enable_experimental_actions {
+        Ok(())
+    } else {
+        Err(make_error_response(
+            axum::http::StatusCode::FORBIDDEN,
+            "experimental_actions_disabled",
+            "Experimental actions are disabled on this daemon.",
+        ))
+    }
+}
+
+fn require_device_capability(
+    state: &AppState,
+    identity: &AuthIdentity,
+    capability: &str,
+) -> Result<(), axum::response::Response> {
+    match identity {
+        AuthIdentity::Admin => Ok(()),
+        AuthIdentity::Device { device_id } => {
+            let allowed = state
+                .storage
+                .device_has_capability(device_id, capability)
+                .map_err(|e| {
+                    make_error_response(
+                        axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                        "capability_check_failed",
+                        &format!("Failed to check capability: {}", e),
+                    )
+                })?;
+            if allowed {
+                Ok(())
+            } else {
+                Err(make_error_response(
+                    axum::http::StatusCode::FORBIDDEN,
+                    "capability_denied",
+                    &format!("Device is missing capability: {capability}"),
+                ))
+            }
+        }
+    }
 }
 
 // Pairing handlers
@@ -557,6 +826,9 @@ async fn pair_complete(
     let token_hash = signal_core::hash_token(&device_token);
     let token_prefix = signal_core::get_token_prefix(&device_token);
 
+    let mode = normalize_pair_mode(payload.mode.as_deref(), payload.experimental_confirmed);
+    let capabilities = default_capabilities_for_mode(&mode, &payload.requested_capabilities);
+
     // Create device
     let device_name = payload.device_name.clone();
     let device = signal_core::models::Device {
@@ -572,7 +844,14 @@ async fn pair_complete(
             .get("user-agent")
             .and_then(|v| v.to_str().ok())
             .map(|s| s.to_string()),
-        metadata_json: None,
+        metadata_json: Some(
+            serde_json::json!({
+                "mode": mode.clone(),
+                "experimental_confirmed": payload.experimental_confirmed,
+                "capabilities_requested": payload.requested_capabilities
+            })
+            .to_string(),
+        ),
     };
 
     let device_id = device.id.clone();
@@ -596,12 +875,42 @@ async fn pair_complete(
             )
         })?;
 
+    for capability in &capabilities {
+        let grant =
+            DeviceCapability::new(device_id.clone(), capability.clone(), "pairing".to_string());
+        state.storage.grant_device_capability(&grant).map_err(|e| {
+            make_error_response(
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                "capability_grant_failed",
+                &format!("Failed to grant device capability: {}", e),
+            )
+        })?;
+    }
+
     info!("Device paired: {} ({})", device_id, device_name);
+    let mut event = EventLogEntry::new(
+        "signal.device.paired".to_string(),
+        "service:signal-daemon".to_string(),
+        format!("device:{}", device_id),
+        serde_json::json!({
+            "device_id": device_id.clone(),
+            "device_name": device_name.clone(),
+            "mode": mode.clone(),
+            "capabilities": capabilities.clone()
+        })
+        .to_string(),
+    );
+    event.subject = Some(format!("device:{}", device_id));
+    event.resource = Some(format!("device:{}", device_id));
+    event.idempotency_key = Some(format!("signal.device.paired:{}", device_id));
+    state.storage.append_event_log(&event).ok();
 
     Ok(Json(PairCompleteResponse {
         device_id,
         device_token,
         device_name: device.name,
+        mode,
+        capabilities,
     }))
 }
 
@@ -866,6 +1175,7 @@ pub fn create_api_router(
     token: Option<String>,
     require_token_for_read: bool,
     enable_web_push: bool,
+    enable_experimental_actions: bool,
     vapid_config: Option<VapidConfig>,
     db_path: String,
 ) -> Router {
@@ -874,6 +1184,7 @@ pub fn create_api_router(
         token,
         require_token_for_read,
         enable_web_push,
+        enable_experimental_actions,
         vapid_config,
         db_path,
     );
@@ -895,6 +1206,18 @@ pub fn create_api_router(
         .route("/api/artifacts/{id}", get(get_artifact_metadata))
         .route("/api/artifacts/{id}/content", get(get_artifact_content))
         .route(
+            "/api/device/me",
+            get(get_device_me).post(update_device_me_capabilities),
+        )
+        .route("/api/actions", get(list_actions).post(create_action))
+        .route("/api/actions/{id}", get(get_action))
+        .route("/api/actions/{id}/claim", post(claim_action))
+        .route("/api/actions/{id}/start", post(start_action))
+        .route("/api/actions/{id}/complete", post(complete_action))
+        .route("/api/actions/{id}/fail", post(fail_action))
+        .route("/api/approvals", get(list_approvals))
+        .route("/api/approvals/{id}/decision", post(decide_approval))
+        .route(
             "/api/messages/{id}/replies",
             get(get_replies).post(create_reply),
         )
@@ -911,6 +1234,98 @@ pub fn create_api_router(
 
 async fn health() -> Json<HealthResponse> {
     Json(HealthResponse { ok: true })
+}
+
+async fn get_device_me(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<DeviceMeResponse>, axum::response::Response> {
+    let identity = check_read_auth(&state, &headers)?;
+    match identity {
+        AuthIdentity::Admin => Ok(Json(DeviceMeResponse {
+            identity: "admin".to_string(),
+            device: None,
+            mode: "admin".to_string(),
+            capabilities: STANDARD_DEVICE_CAPABILITIES
+                .iter()
+                .chain(EXPERIMENTAL_DEVICE_CAPABILITIES.iter())
+                .map(|value| value.to_string())
+                .collect(),
+            experimental_actions_enabled: state.enable_experimental_actions,
+        })),
+        AuthIdentity::Device { device_id } => {
+            let device = state.storage.get_device(&device_id).map_err(|e| {
+                make_error_response(
+                    axum::http::StatusCode::NOT_FOUND,
+                    "device_not_found",
+                    &format!("Device not found: {}", e),
+                )
+            })?;
+            let mode = extract_device_mode(device.metadata_json.as_deref());
+            let mut capabilities = state
+                .storage
+                .list_active_device_capabilities(&device_id)
+                .map_err(|e| {
+                    make_error_response(
+                        axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                        "capabilities_failed",
+                        &format!("Failed to list capabilities: {}", e),
+                    )
+                })?;
+            if capabilities.is_empty() {
+                capabilities = default_capabilities_for_mode(&mode, &[]);
+            }
+            Ok(Json(DeviceMeResponse {
+                identity: "device".to_string(),
+                device: Some(device_info_from_device(device)),
+                mode,
+                capabilities,
+                experimental_actions_enabled: state.enable_experimental_actions,
+            }))
+        }
+    }
+}
+
+async fn update_device_me_capabilities(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    axum::extract::Json(payload): axum::extract::Json<UpdateCapabilitiesRequest>,
+) -> Result<Json<UpdateCapabilitiesResponse>, axum::response::Response> {
+    let identity = check_auth(&state, &headers)?;
+    let AuthIdentity::Device { device_id } = identity else {
+        return Err(make_error_response(
+            axum::http::StatusCode::BAD_REQUEST,
+            "device_required",
+            "Use a paired device token to change this device's capabilities.",
+        ));
+    };
+
+    for capability in payload.disable {
+        if is_supported_capability(&capability) {
+            state
+                .storage
+                .revoke_device_capability(&device_id, &capability)
+                .map_err(|e| {
+                    make_error_response(
+                        axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                        "capability_update_failed",
+                        &format!("Failed to update capability: {}", e),
+                    )
+                })?;
+        }
+    }
+
+    let capabilities = state
+        .storage
+        .list_active_device_capabilities(&device_id)
+        .map_err(|e| {
+            make_error_response(
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                "capabilities_failed",
+                &format!("Failed to list capabilities: {}", e),
+            )
+        })?;
+    Ok(Json(UpdateCapabilitiesResponse { capabilities }))
 }
 
 async fn create_event_log(
@@ -949,6 +1364,441 @@ async fn list_event_log(
             )
         })?;
     Ok(Json(events))
+}
+
+fn append_action_event(state: &AppState, event_type: &str, action: &ActionIntent, extra: Value) {
+    let mut event = EventLogEntry::new(
+        event_type.to_string(),
+        "service:signal-daemon".to_string(),
+        action
+            .requested_by_device_id
+            .as_deref()
+            .map(|device_id| format!("device:{device_id}"))
+            .unwrap_or_else(|| "admin:local".to_string()),
+        serde_json::json!({
+            "action_id": action.id,
+            "message_id": action.message_id,
+            "kind": action.kind,
+            "status": action.status,
+            "agent_id": action.agent_id,
+            "project": action.project,
+            "profile_id": action.profile_id,
+            "risk": action.risk,
+            "required_capability": action.required_capability,
+            "payload_hash": action.payload_hash,
+            "extra": extra
+        })
+        .to_string(),
+    );
+    event.subject = Some(format!("action:{}", action.id));
+    event.visibility = PermissionLevel::AiReadable;
+    event.correlation_id = Some(action.message_id.clone());
+    event.resource = Some(format!("action:{}", action.id));
+    event.idempotency_key = Some(format!("{}:{}", event_type, action.id));
+    let _ = state.storage.append_event_log(&event);
+}
+
+async fn create_action(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    axum::extract::Json(payload): axum::extract::Json<CreateActionRequest>,
+) -> Result<Json<CreateActionResponse>, axum::response::Response> {
+    require_experimental_enabled(&state)?;
+    let identity = check_auth(&state, &headers)?;
+    let requester_is_admin = matches!(identity, AuthIdentity::Admin);
+    let (required_capability, risk) = action_requirement(
+        &payload.kind,
+        payload.profile_id.as_deref(),
+        payload.risk.as_deref(),
+    )
+    .ok_or_else(|| {
+        make_error_response(
+            axum::http::StatusCode::BAD_REQUEST,
+            "unknown_action_kind",
+            "Unknown action kind. Use wake_agent, file_request, or profile_run.",
+        )
+    })?;
+    require_device_capability(&state, &identity, &required_capability)?;
+
+    let requested_by_device_id = match &identity {
+        AuthIdentity::Device { device_id } => Some(device_id.clone()),
+        AuthIdentity::Admin => None,
+    };
+
+    let body = payload
+        .body
+        .clone()
+        .unwrap_or_else(|| match payload.kind.as_str() {
+            "wake_agent" | "wake" => "hello".to_string(),
+            "file_request" | "request_file" => "Request file artifact".to_string(),
+            "profile_run" | "run_profile" => "Run local profile".to_string(),
+            _ => "Action requested".to_string(),
+        });
+    let title = match payload.kind.as_str() {
+        "wake_agent" | "wake" => format!("Wake {}", payload.agent_id.as_deref().unwrap_or("agent")),
+        "file_request" | "request_file" => "File request".to_string(),
+        "profile_run" | "run_profile" => {
+            format!("Run {}", payload.profile_id.as_deref().unwrap_or("profile"))
+        }
+        _ => "Action".to_string(),
+    };
+
+    let mut message = Message::new(
+        title,
+        body,
+        if requested_by_device_id.is_some() {
+            "pwa".to_string()
+        } else {
+            "admin".to_string()
+        },
+        requested_by_device_id.clone(),
+        payload.agent_id.clone(),
+        payload.project.clone(),
+        PermissionLevel::Actionable,
+    );
+    if requires_approval(&risk) {
+        message.status = MessageStatus::PendingReply;
+        message.reply_mode = Some("approval".to_string());
+    }
+
+    let mut action_payload = payload.payload;
+    if let Value::Object(map) = &mut action_payload {
+        map.entry("body")
+            .or_insert(Value::String(message.body.clone()));
+    }
+
+    let mut action = ActionIntent::new(
+        message.id.clone(),
+        match payload.kind.as_str() {
+            "wake" => "wake_agent".to_string(),
+            "request_file" => "file_request".to_string(),
+            "run_profile" => "profile_run".to_string(),
+            other => other.to_string(),
+        },
+        requested_by_device_id,
+        payload.agent_id,
+        payload.project,
+        payload.profile_id,
+        risk,
+        required_capability,
+        action_payload,
+        payload.ttl_seconds.or(Some(30 * 60)),
+    );
+
+    let storage = state.storage.as_ref();
+    storage.create_message(&message).map_err(|e| {
+        make_error_response(
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            "message_create_failed",
+            &format!("Failed to create action message: {}", e),
+        )
+    })?;
+    storage
+        .append_event_log(&EventLogEntry::message_created(&message))
+        .ok();
+
+    storage.create_action_intent(&action).map_err(|e| {
+        make_error_response(
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            "action_create_failed",
+            &format!("Failed to create action: {}", e),
+        )
+    })?;
+
+    let mut approval = None;
+    let mut approval_nonce = None;
+    if requires_approval(&action.risk) {
+        let nonce = generate_approval_nonce();
+        let next_approval = ActionApproval::new(
+            action.id.clone(),
+            &nonce,
+            action.payload_hash.clone(),
+            5 * 60,
+        );
+        storage
+            .create_action_approval(&next_approval)
+            .map_err(|e| {
+                make_error_response(
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    "approval_create_failed",
+                    &format!("Failed to create approval: {}", e),
+                )
+            })?;
+        action = storage.get_action_intent(&action.id).unwrap_or(action);
+        if requester_is_admin {
+            approval_nonce = Some(nonce);
+        }
+        approval = Some(next_approval);
+        append_action_event(
+            &state,
+            "signal.action.approval_requested",
+            &action,
+            serde_json::json!({"approval_id": approval.as_ref().map(|item| item.id.clone())}),
+        );
+    }
+
+    append_action_event(
+        &state,
+        "signal.action.created",
+        &action,
+        serde_json::json!({}),
+    );
+    send_message_push_notification(&state, &message).await;
+
+    Ok(Json(CreateActionResponse {
+        action,
+        message,
+        approval,
+        approval_nonce,
+    }))
+}
+
+async fn list_actions(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<ListActionsQuery>,
+) -> Result<Json<Vec<ActionIntent>>, axum::response::Response> {
+    require_experimental_enabled(&state)?;
+    check_auth(&state, &headers)?;
+    let actions = state
+        .storage
+        .list_action_intents(
+            query.status.as_deref(),
+            query.agent_id.as_deref(),
+            query.project.as_deref(),
+            query.limit,
+        )
+        .map_err(|e| {
+            make_error_response(
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                "action_list_failed",
+                &format!("Failed to list actions: {}", e),
+            )
+        })?;
+    Ok(Json(actions))
+}
+
+async fn get_action(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<Json<ActionIntent>, axum::response::Response> {
+    require_experimental_enabled(&state)?;
+    check_auth(&state, &headers)?;
+    let action = state.storage.get_action_intent(&id).map_err(|e| {
+        make_error_response(
+            axum::http::StatusCode::NOT_FOUND,
+            "action_not_found",
+            &format!("Action not found: {}", e),
+        )
+    })?;
+    Ok(Json(action))
+}
+
+async fn claim_action(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    axum::extract::Json(payload): axum::extract::Json<ClaimActionRequest>,
+) -> Result<Json<ClaimActionResponse>, axum::response::Response> {
+    require_experimental_enabled(&state)?;
+    check_admin_auth(&state, &headers)?;
+    let run = state
+        .storage
+        .claim_action_intent(
+            &id,
+            &payload.worker_id,
+            payload.policy_hash.as_deref(),
+            payload.lease_seconds.or(Some(120)),
+        )
+        .map_err(|e| {
+            make_error_response(
+                axum::http::StatusCode::CONFLICT,
+                "action_claim_failed",
+                &format!("Failed to claim action: {}", e),
+            )
+        })?;
+    let action = state.storage.get_action_intent(&id).map_err(|e| {
+        make_error_response(
+            axum::http::StatusCode::NOT_FOUND,
+            "action_not_found",
+            &format!("Action not found: {}", e),
+        )
+    })?;
+    append_action_event(
+        &state,
+        "signal.action.claimed",
+        &action,
+        serde_json::json!({"run_id": run.id, "worker_id": run.worker_id}),
+    );
+    Ok(Json(ClaimActionResponse { action, run }))
+}
+
+async fn start_action(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    axum::extract::Json(payload): axum::extract::Json<CompleteActionRequest>,
+) -> Result<Json<ActionRun>, axum::response::Response> {
+    require_experimental_enabled(&state)?;
+    check_admin_auth(&state, &headers)?;
+    let run = state
+        .storage
+        .mark_action_run_started(&payload.run_id)
+        .map_err(|e| {
+            make_error_response(
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                "action_start_failed",
+                &format!("Failed to start action: {}", e),
+            )
+        })?;
+    if let Ok(action) = state.storage.get_action_intent(&id) {
+        append_action_event(
+            &state,
+            "signal.action.started",
+            &action,
+            serde_json::json!({"run_id": run.id}),
+        );
+    }
+    Ok(Json(run))
+}
+
+async fn complete_action(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    axum::extract::Json(payload): axum::extract::Json<CompleteActionRequest>,
+) -> Result<Json<ActionRun>, axum::response::Response> {
+    require_experimental_enabled(&state)?;
+    check_admin_auth(&state, &headers)?;
+    let error_json = payload
+        .error
+        .as_ref()
+        .map(|value| serde_json::to_string(value).unwrap_or_else(|_| "{}".to_string()));
+    let run = state
+        .storage
+        .complete_action_run(
+            &payload.run_id,
+            "succeeded",
+            payload.exit_code,
+            payload.output_summary.as_deref(),
+            error_json.as_deref(),
+        )
+        .map_err(|e| {
+            make_error_response(
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                "action_complete_failed",
+                &format!("Failed to complete action: {}", e),
+            )
+        })?;
+    if let Ok(action) = state.storage.get_action_intent(&id) {
+        append_action_event(
+            &state,
+            "signal.action.completed",
+            &action,
+            serde_json::json!({"run_id": run.id, "exit_code": run.exit_code}),
+        );
+    }
+    Ok(Json(run))
+}
+
+async fn fail_action(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    axum::extract::Json(payload): axum::extract::Json<CompleteActionRequest>,
+) -> Result<Json<ActionRun>, axum::response::Response> {
+    require_experimental_enabled(&state)?;
+    check_admin_auth(&state, &headers)?;
+    let error_json = payload
+        .error
+        .as_ref()
+        .map(|value| serde_json::to_string(value).unwrap_or_else(|_| "{}".to_string()));
+    let run = state
+        .storage
+        .complete_action_run(
+            &payload.run_id,
+            "failed",
+            payload.exit_code,
+            payload.output_summary.as_deref(),
+            error_json.as_deref(),
+        )
+        .map_err(|e| {
+            make_error_response(
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                "action_fail_failed",
+                &format!("Failed to fail action: {}", e),
+            )
+        })?;
+    if let Ok(action) = state.storage.get_action_intent(&id) {
+        append_action_event(
+            &state,
+            "signal.action.failed",
+            &action,
+            serde_json::json!({"run_id": run.id, "exit_code": run.exit_code}),
+        );
+    }
+    Ok(Json(run))
+}
+
+async fn list_approvals(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<ListApprovalsQuery>,
+) -> Result<Json<Vec<ActionApproval>>, axum::response::Response> {
+    require_experimental_enabled(&state)?;
+    let identity = check_auth(&state, &headers)?;
+    require_device_capability(&state, &identity, "approval.decide")?;
+    let approvals = state
+        .storage
+        .list_action_approvals(query.status.as_deref(), query.limit)
+        .map_err(|e| {
+            make_error_response(
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                "approval_list_failed",
+                &format!("Failed to list approvals: {}", e),
+            )
+        })?;
+    Ok(Json(approvals))
+}
+
+async fn decide_approval(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    axum::extract::Json(payload): axum::extract::Json<ApprovalDecisionRequest>,
+) -> Result<Json<ActionApproval>, axum::response::Response> {
+    require_experimental_enabled(&state)?;
+    let identity = check_auth(&state, &headers)?;
+    require_device_capability(&state, &identity, "approval.decide")?;
+    let device_id = match &identity {
+        AuthIdentity::Device { device_id } => Some(device_id.as_str()),
+        AuthIdentity::Admin => None,
+    };
+    let approval = state
+        .storage
+        .decide_action_approval(&id, &payload.decision, payload.nonce.as_deref(), device_id)
+        .map_err(|e| {
+            make_error_response(
+                axum::http::StatusCode::FORBIDDEN,
+                "approval_decision_failed",
+                &format!("Failed to decide approval: {}", e),
+            )
+        })?;
+    if let Ok(action) = state.storage.get_action_intent(&approval.intent_id) {
+        let event_type = if approval.status == "approved" {
+            "signal.action.approved"
+        } else {
+            "signal.action.denied"
+        };
+        append_action_event(
+            &state,
+            event_type,
+            &action,
+            serde_json::json!({"approval_id": approval.id}),
+        );
+    }
+    Ok(Json(approval))
 }
 
 async fn create_message(
@@ -2595,6 +3445,15 @@ async fn pair_page(
         h1 {{ font-size: 28px; margin-bottom: 8px; }}
         p {{ font-size: 15px; color: #6e6e73; margin: 12px 0; line-height: 1.5; }}
         input {{ width: 100%; padding: 12px; border: 1px solid #e5e5ea; border-radius: 8px; font-size: 15px; margin: 12px 0; font-family: inherit; }}
+        label {{ display: block; }}
+        .mode-grid {{ display: grid; gap: 10px; margin: 14px 0; }}
+        .mode-card {{ background: white; border: 1px solid #e5e5ea; border-radius: 10px; padding: 12px; }}
+        .mode-card input {{ width: auto; margin: 0 8px 0 0; }}
+        .mode-card strong {{ font-size: 15px; }}
+        .mode-card span {{ display: block; margin: 6px 0 0 28px; font-size: 13px; color: #6e6e73; line-height: 1.4; }}
+        .cap-list {{ display: grid; gap: 6px; margin: 10px 0; font-size: 13px; color: #515154; }}
+        .cap-list label {{ display: flex; gap: 8px; align-items: flex-start; }}
+        .cap-list input {{ width: auto; margin: 2px 0 0; }}
         button {{ width: 100%; padding: 12px; background: #007aff; color: white; border: none; border-radius: 8px; font-size: 15px; font-weight: 600; cursor: pointer; margin-top: 12px; }}
         button:disabled {{ background: #d1d1d6; cursor: not-allowed; }}
         .status {{ padding: 12px; border-radius: 8px; margin: 12px 0; display: none; }}
@@ -2607,10 +3466,23 @@ async fn pair_page(
 <body>
     <div class="container">
         <div class="card">
-            <h1>🔗 Pair This Device</h1>
-            <p>Enter a name for this device and tap Pair to connect it to Signal.</p>
+            <h1>Pair This Device</h1>
+            <p>Choose the permission set for this phone. Experimental features are opt-in and can be revoked later.</p>
             
             <input type="text" id="device-name" placeholder="Device name (e.g., iPhone, iPad)" autofocus>
+            <div class="mode-grid">
+                <label class="mode-card">
+                    <input type="radio" name="pair-mode" value="standard" checked onchange="renderCapabilities()">
+                    <strong>Standard</strong>
+                    <span>Notifications, replies, artifacts, and history. No local actions.</span>
+                </label>
+                <label class="mode-card">
+                    <input type="radio" name="pair-mode" value="experimental" onchange="renderCapabilities()">
+                    <strong>Experimental Local Actions</strong>
+                    <span>Allows this phone to request wake pings, ask creation, file artifacts, and low-risk named profiles.</span>
+                </label>
+            </div>
+            <div id="cap-list" class="cap-list"></div>
             <button id="pair-btn" onclick="completePair()">Pair Device</button>
             
             <div id="status" class="status"></div>
@@ -2621,15 +3493,33 @@ async fn pair_page(
 
     <script>
         const PAIRING_CODE = '{code}';
+        const STANDARD_CAPABILITIES = ['messages.read', 'messages.reply', 'ask.respond', 'events.read', 'artifacts.read', 'push.subscribe'];
+        const EXPERIMENTAL_CAPABILITIES = ['ask.create', 'agent.wake', 'artifact.request', 'approval.decide', 'profile.run.low'];
         
         function showStatus(message, type) {{
             const status = document.getElementById('status');
             status.textContent = message;
             status.className = 'status ' + type;
         }}
+
+        function selectedMode() {{
+            const input = document.querySelector('input[name="pair-mode"]:checked');
+            return input ? input.value : 'standard';
+        }}
+
+        function renderCapabilities() {{
+            const mode = selectedMode();
+            const caps = mode === 'experimental' ? EXPERIMENTAL_CAPABILITIES : STANDARD_CAPABILITIES;
+            document.getElementById('cap-list').innerHTML = caps.map((capability) => {{
+                const checked = mode === 'experimental' ? ' checked' : ' checked disabled';
+                return '<label><input type="checkbox" value="' + capability + '"' + checked + '>' + capability + '</label>';
+            }}).join('');
+        }}
         
         async function completePair() {{
             const deviceName = document.getElementById('device-name').value.trim() || 'Device';
+            const mode = selectedMode();
+            const requestedCapabilities = Array.from(document.querySelectorAll('#cap-list input:checked')).map((input) => input.value);
             const btn = document.getElementById('pair-btn');
             
             btn.disabled = true;
@@ -2644,7 +3534,10 @@ async fn pair_page(
                     body: JSON.stringify({{
                         pairing_code: PAIRING_CODE,
                         device_name: deviceName,
-                        device_kind: 'phone'
+                        device_kind: 'phone',
+                        mode,
+                        requested_capabilities: requestedCapabilities,
+                        experimental_confirmed: mode === 'experimental'
                     }})
                 }});
                 
@@ -2674,6 +3567,7 @@ async fn pair_page(
         document.getElementById('device-name').addEventListener('keypress', function(e) {{
             if (e.key === 'Enter') completePair();
         }});
+        renderCapabilities();
     </script>
 </body>
 </html>"#,
@@ -2778,6 +3672,7 @@ pub fn create_html_router(
     token: Option<String>,
     require_token_for_read: bool,
     enable_web_push: bool,
+    enable_experimental_actions: bool,
     vapid_config: Option<VapidConfig>,
     db_path: String,
 ) -> Router {
@@ -2793,6 +3688,7 @@ pub fn create_html_router(
             token,
             require_token_for_read,
             enable_web_push,
+            enable_experimental_actions,
             vapid_config,
             db_path,
         ))
@@ -3089,6 +3985,7 @@ mod tests {
             Some("dev-token".to_string()),
             true,
             true,
+            false,
             Some(VapidConfig {
                 private_key: "private".to_string(),
                 public_key: "invalid".to_string(),
