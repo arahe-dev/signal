@@ -303,7 +303,7 @@ pub fn build_message_payload(
 ) -> String {
     let url = build_message_url(&message.id, public_base_url, token);
 
-    let mut context = format!("{}: {}", message.source, message.body);
+    let mut context = format!("New message from {}", message.source);
     if let Some(project) = &message.project {
         if !project.is_empty() {
             context = format!("[{}] {}", project, context);
@@ -324,20 +324,14 @@ pub fn build_message_payload(
 pub fn build_message_url(
     message_id: &str,
     public_base_url: Option<&str>,
-    token: Option<&str>,
+    _token: Option<&str>,
 ) -> String {
     let base = public_base_url.unwrap_or("");
-    let mut url = if base.is_empty() {
-        format!("/message/{}", message_id)
+    if base.is_empty() {
+        format!("/app?message={}", message_id)
     } else {
-        format!("{}/message/{}", base.trim_end_matches('/'), message_id)
-    };
-    if let Some(token) = token {
-        if !token.is_empty() {
-            url = format!("{}?token={}", url, token);
-        }
+        format!("{}/app?message={}", base.trim_end_matches('/'), message_id)
     }
-    url
 }
 
 #[cfg(test)]
@@ -360,19 +354,19 @@ mod tests {
     }
 
     #[test]
-    fn message_url_generation_includes_message_and_token() {
+    fn message_url_generation_uses_pwa_deep_link_without_token() {
         assert_eq!(
             build_message_url(
                 "message-123",
                 Some("https://example.test"),
                 Some("dev-token")
             ),
-            "https://example.test/message/message-123?token=dev-token"
+            "https://example.test/app?message=message-123"
         );
     }
 
     #[test]
-    fn notification_payload_url_points_to_message_detail() {
+    fn notification_payload_url_points_to_pwa_message() {
         let payload: serde_json::Value = serde_json::from_str(&build_message_payload(
             &message(),
             Some("https://example.test"),
@@ -381,7 +375,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             payload["url"],
-            "https://example.test/message/message-123?token=dev-token"
+            "https://example.test/app?message=message-123"
         );
     }
 
@@ -396,7 +390,7 @@ mod tests {
         assert_eq!(payload["title"], "Signal");
         assert_eq!(
             payload["url"],
-            "https://example.test/message/message-123?token=dev-token"
+            "https://example.test/app?message=message-123"
         );
     }
 }

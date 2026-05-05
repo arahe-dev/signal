@@ -6,7 +6,7 @@ Signal uses standards-based Web Push for the iPhone Home Screen PWA. The push pa
 {
   "title": "Signal",
   "body": "New Signal message. Tap to open inbox.",
-  "url": "/app"
+  "url": "/app?message=<message-id>"
 }
 ```
 
@@ -23,7 +23,7 @@ cargo run -p signal-daemon -- `
   --require-token-for-read `
   --enable-web-push `
   --vapid-file .\signal_vapid.json `
-  --vapid-subject mailto:signal@example.local `
+  --vapid-subject mailto:you@example.com `
   --public-base-url https://your-device.your-tailnet.ts.net
 ```
 
@@ -50,7 +50,7 @@ Apple touch icons are served with `Cache-Control: no-cache, no-store, must-reval
 1. Delete the old Signal Home Screen icon.
 2. Open Settings -> Safari -> Advanced -> Website Data.
 3. Delete data for `your-device.your-tailnet.ts.net` if present.
-4. Reopen: `https://your-device.your-tailnet.ts.net/app?token=dev-token`
+4. Reopen: `https://your-device.your-tailnet.ts.net/app`
 5. Share -> Add to Home Screen.
 6. If icon still does not update, restart Safari/iPhone and retry.
 

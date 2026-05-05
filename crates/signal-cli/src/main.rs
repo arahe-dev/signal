@@ -1,6 +1,10 @@
+use base64::Engine as _;
 use clap::{Parser, Subcommand, ValueEnum};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::time::Duration;
 
 #[derive(Parser)]
@@ -100,6 +104,22 @@ enum Commands {
         #[arg(long, default_value = "cli")]
         source: String,
     },
+    Events {
+        #[arg(long)]
+        after_seq: Option<i64>,
+        #[arg(long, default_value_t = 50)]
+        limit: i64,
+        #[arg(long)]
+        json: bool,
+    },
+    Context {
+        #[command(subcommand)]
+        subcommand: ContextSubcommand,
+    },
+    Artifact {
+        #[command(subcommand)]
+        subcommand: ArtifactSubcommand,
+    },
     Pair {
         #[command(subcommand)]
         subcommand: PairSubcommand,
@@ -121,6 +141,48 @@ enum Commands {
         timeout_seconds: u64,
         #[arg(long)]
         strict: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum ContextSubcommand {
+    Capture {
+        #[arg(long)]
+        message_id: String,
+        #[arg(long, default_value = "progress")]
+        stage: String,
+        #[arg(long, default_value = "agent:codex")]
+        source: String,
+        #[arg(long, default_value = ".")]
+        repo: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum ArtifactSubcommand {
+    Upload {
+        #[arg(long)]
+        message_id: String,
+        #[arg(long)]
+        path: PathBuf,
+        #[arg(long, default_value = "screenshot")]
+        kind: String,
+        #[arg(long)]
+        media_type: Option<String>,
+        #[arg(long)]
+        snapshot_id: Option<String>,
+        #[arg(long)]
+        pinned: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    List {
+        #[arg(long)]
+        message_id: String,
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -183,6 +245,86 @@ struct CreateReplyRequest {
     source: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     source_device: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct CreateContextSnapshotRequest {
+    source: String,
+    stage: String,
+    status: Value,
+    repo_root_display: Option<String>,
+    git_common_dir_hash: Option<String>,
+    worktree_path_display: Option<String>,
+    branch: Option<String>,
+    head_oid: Option<String>,
+    upstream: Option<String>,
+    ahead: Option<i64>,
+    behind: Option<i64>,
+    dirty: bool,
+    staged_count: i64,
+    unstaged_count: i64,
+    untracked_count: i64,
+    worktrees: Option<Value>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct ContextSnapshot {
+    id: String,
+    message_id: String,
+    captured_at: String,
+    source: String,
+    stage: String,
+    #[serde(default)]
+    branch: Option<String>,
+    #[serde(default)]
+    head_oid: Option<String>,
+    #[serde(default)]
+    dirty: bool,
+    staged_count: i64,
+    unstaged_count: i64,
+    untracked_count: i64,
+}
+
+#[derive(Debug, Serialize)]
+struct UploadArtifactRequest {
+    message_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    snapshot_id: Option<String>,
+    kind: String,
+    media_type: String,
+    data_base64: String,
+    pinned: bool,
+    metadata: Value,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct ArtifactMetadata {
+    id: String,
+    message_id: String,
+    #[serde(default)]
+    snapshot_id: Option<String>,
+    kind: String,
+    media_type: String,
+    sha256: String,
+    size_bytes: i64,
+    storage_uri: String,
+    created_at: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct EventLogEntry {
+    seq: Option<i64>,
+    event_id: String,
+    event_type: String,
+    source: String,
+    actor: String,
+    #[serde(default)]
+    subject: Option<String>,
+    event_time: String,
+    inserted_at: String,
+    data_json: String,
+    #[serde(default)]
+    resource: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -593,6 +735,55 @@ impl ApiClient {
         parse_response(response, "create reply").await
     }
 
+    async fn list_events(
+        &self,
+        after_seq: Option<i64>,
+        limit: i64,
+    ) -> Result<Vec<EventLogEntry>, Box<dyn std::error::Error>> {
+        let mut url = format!("{}/api/events?limit={}", self.base_url, limit);
+        if let Some(after_seq) = after_seq {
+            url.push_str(&format!("&after_seq={}", after_seq));
+        }
+        let response = self.add_auth(self.client.get(&url)).send().await?;
+        parse_response(response, "list events").await
+    }
+
+    async fn capture_context(
+        &self,
+        message_id: &str,
+        request: &CreateContextSnapshotRequest,
+    ) -> Result<ContextSnapshot, Box<dyn std::error::Error>> {
+        let url = format!("{}/api/messages/{}/context", self.base_url, message_id);
+        let response = self
+            .add_auth(self.client.post(&url))
+            .json(request)
+            .send()
+            .await?;
+        parse_response(response, "capture context").await
+    }
+
+    async fn upload_artifact(
+        &self,
+        request: &UploadArtifactRequest,
+    ) -> Result<ArtifactMetadata, Box<dyn std::error::Error>> {
+        let url = format!("{}/api/artifacts/upload", self.base_url);
+        let response = self
+            .add_auth(self.client.post(&url))
+            .json(request)
+            .send()
+            .await?;
+        parse_response(response, "upload artifact").await
+    }
+
+    async fn list_artifacts(
+        &self,
+        message_id: &str,
+    ) -> Result<Vec<ArtifactMetadata>, Box<dyn std::error::Error>> {
+        let url = format!("{}/api/messages/{}/artifacts", self.base_url, message_id);
+        let response = self.add_auth(self.client.get(&url)).send().await?;
+        parse_response(response, "list artifacts").await
+    }
+
     async fn pair_start(
         &self,
         device_name: String,
@@ -673,6 +864,166 @@ async fn parse_response<T: for<'de> Deserialize<'de>>(
         return Err(format!("Failed to {}: HTTP {} {}", action, status, text).into());
     }
     Ok(response.json().await?)
+}
+
+fn run_git(repo: &Path, args: &[&str]) -> Option<String> {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(repo)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    Some(
+        String::from_utf8_lossy(&output.stdout)
+            .trim_end()
+            .to_string(),
+    )
+}
+
+fn parse_status_counts(status: &str) -> (bool, i64, i64, i64) {
+    let mut staged = 0;
+    let mut unstaged = 0;
+    let mut untracked = 0;
+
+    for line in status.lines().filter(|line| !line.starts_with("##")) {
+        if line.starts_with("??") {
+            untracked += 1;
+            continue;
+        }
+        let mut chars = line.chars();
+        let index = chars.next().unwrap_or(' ');
+        let worktree = chars.next().unwrap_or(' ');
+        if index != ' ' {
+            staged += 1;
+        }
+        if worktree != ' ' {
+            unstaged += 1;
+        }
+    }
+
+    (
+        staged + unstaged + untracked > 0,
+        staged,
+        unstaged,
+        untracked,
+    )
+}
+
+fn parse_ahead_behind(value: Option<String>) -> (Option<i64>, Option<i64>) {
+    let Some(value) = value else {
+        return (None, None);
+    };
+    let parts = value
+        .split_whitespace()
+        .filter_map(|part| part.parse::<i64>().ok())
+        .collect::<Vec<_>>();
+    if parts.len() == 2 {
+        (Some(parts[1]), Some(parts[0]))
+    } else {
+        (None, None)
+    }
+}
+
+fn build_context_snapshot_request(
+    repo: &Path,
+    source: String,
+    stage: String,
+) -> CreateContextSnapshotRequest {
+    let status = run_git(repo, &["status", "--porcelain=v1", "-b"]).unwrap_or_default();
+    let (dirty, staged_count, unstaged_count, untracked_count) = parse_status_counts(&status);
+    let (ahead, behind) = parse_ahead_behind(run_git(
+        repo,
+        &["rev-list", "--left-right", "--count", "@{u}...HEAD"],
+    ));
+    let repo_root = run_git(repo, &["rev-parse", "--show-toplevel"]).or_else(|| {
+        repo.canonicalize()
+            .ok()
+            .map(|path| path.display().to_string())
+    });
+    let worktree_path = repo
+        .canonicalize()
+        .ok()
+        .map(|path| path.display().to_string());
+    let worktrees = run_git(repo, &["worktree", "list", "--porcelain"])
+        .map(|raw| serde_json::json!({ "porcelain": raw }));
+
+    CreateContextSnapshotRequest {
+        source,
+        stage,
+        status: serde_json::json!({
+            "git_status_porcelain": status,
+            "captured_by": "signal-cli",
+        }),
+        repo_root_display: repo_root,
+        git_common_dir_hash: None,
+        worktree_path_display: worktree_path,
+        branch: run_git(repo, &["rev-parse", "--abbrev-ref", "HEAD"]),
+        head_oid: run_git(repo, &["rev-parse", "HEAD"]),
+        upstream: run_git(
+            repo,
+            &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
+        ),
+        ahead,
+        behind,
+        dirty,
+        staged_count,
+        unstaged_count,
+        untracked_count,
+        worktrees,
+    }
+}
+
+fn infer_media_type(path: &Path) -> String {
+    match path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "webp" => "image/webp",
+        "gif" => "image/gif",
+        "svg" => "image/svg+xml",
+        "txt" | "log" => "text/plain",
+        "json" => "application/json",
+        "html" | "htm" => "text/html",
+        "pdf" => "application/pdf",
+        _ => "application/octet-stream",
+    }
+    .to_string()
+}
+
+fn build_upload_artifact_request(
+    message_id: String,
+    path: PathBuf,
+    kind: String,
+    media_type: Option<String>,
+    snapshot_id: Option<String>,
+    pinned: bool,
+) -> Result<UploadArtifactRequest, Box<dyn std::error::Error>> {
+    let bytes = std::fs::read(&path)?;
+    let data_base64 = base64::engine::general_purpose::STANDARD.encode(bytes);
+    let file_name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("artifact")
+        .to_string();
+    Ok(UploadArtifactRequest {
+        message_id,
+        snapshot_id,
+        kind,
+        media_type: media_type.unwrap_or_else(|| infer_media_type(&path)),
+        data_base64,
+        pinned,
+        metadata: serde_json::json!({
+            "file_name": file_name,
+            "uploaded_by": "signal-cli"
+        }),
+    })
 }
 
 pub fn parse_timeout_seconds(input: &str) -> Result<u64, String> {
@@ -1104,6 +1455,118 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("Reply created: {}", reply.id);
             println!("Status: {}", reply.status);
         }
+        Commands::Events {
+            after_seq,
+            limit,
+            json,
+        } => {
+            let events = client.list_events(after_seq, limit).await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&events)?);
+            } else if events.is_empty() {
+                println!("No events found.");
+            } else {
+                for event in &events {
+                    println!(
+                        "#{} {} {}",
+                        event.seq.unwrap_or_default(),
+                        event.event_type,
+                        event.inserted_at
+                    );
+                    println!("Source: {} | Actor: {}", event.source, event.actor);
+                    if let Some(subject) = &event.subject {
+                        println!("Subject: {}", subject);
+                    }
+                    if let Some(resource) = &event.resource {
+                        println!("Resource: {}", resource);
+                    }
+                    println!("Data: {}", event.data_json);
+                    println!();
+                }
+            }
+        }
+        Commands::Context { subcommand } => match subcommand {
+            ContextSubcommand::Capture {
+                message_id,
+                stage,
+                source,
+                repo,
+                json,
+            } => {
+                let request = build_context_snapshot_request(&repo, source, stage);
+                let snapshot = client.capture_context(&message_id, &request).await?;
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&snapshot)?);
+                } else {
+                    println!("Context snapshot captured: {}", snapshot.id);
+                    println!("Message: {}", snapshot.message_id);
+                    println!("Stage: {}", snapshot.stage);
+                    println!(
+                        "Branch: {}",
+                        snapshot.branch.as_deref().unwrap_or("unknown")
+                    );
+                    println!(
+                        "HEAD: {}",
+                        snapshot.head_oid.as_deref().unwrap_or("unknown")
+                    );
+                    println!(
+                        "Dirty: {} (staged={}, unstaged={}, untracked={})",
+                        snapshot.dirty,
+                        snapshot.staged_count,
+                        snapshot.unstaged_count,
+                        snapshot.untracked_count
+                    );
+                }
+            }
+        },
+        Commands::Artifact { subcommand } => match subcommand {
+            ArtifactSubcommand::Upload {
+                message_id,
+                path,
+                kind,
+                media_type,
+                snapshot_id,
+                pinned,
+                json,
+            } => {
+                let request = build_upload_artifact_request(
+                    message_id,
+                    path,
+                    kind,
+                    media_type,
+                    snapshot_id,
+                    pinned,
+                )?;
+                let artifact = client.upload_artifact(&request).await?;
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&artifact)?);
+                } else {
+                    println!("Artifact uploaded: {}", artifact.id);
+                    println!("Kind: {} | Type: {}", artifact.kind, artifact.media_type);
+                    println!("Size: {} bytes", artifact.size_bytes);
+                    println!("SHA-256: {}", artifact.sha256);
+                    println!("Content URL: /api/artifacts/{}/content", artifact.id);
+                }
+            }
+            ArtifactSubcommand::List { message_id, json } => {
+                let artifacts = client.list_artifacts(&message_id).await?;
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&artifacts)?);
+                } else if artifacts.is_empty() {
+                    println!("No artifacts found.");
+                } else {
+                    for artifact in &artifacts {
+                        println!("{} {}", artifact.id, artifact.kind);
+                        println!(
+                            "Type: {} | Size: {}",
+                            artifact.media_type, artifact.size_bytes
+                        );
+                        println!("Content URL: /api/artifacts/{}/content", artifact.id);
+                        println!();
+                    }
+                }
+            }
+        },
         Commands::Pair { subcommand } => {
             match subcommand {
                 PairSubcommand::Start { name, json } => {

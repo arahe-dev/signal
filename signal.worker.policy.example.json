@@ -1,0 +1,31 @@
+{
+  "worker_id": "desktop-legion-codex",
+  "agent_id": "codex",
+  "project_roots": {
+    "signal": "C:\\tmp\\signal-architecture-plan"
+  },
+  "profiles": {
+    "wake_codex": {
+      "kind": "command",
+      "risk": "low",
+      "command": "wt.exe",
+      "args": [
+        "powershell",
+        "-NoExit",
+        "-Command",
+        "cd C:\\tmp\\signal-architecture-plan; codex"
+      ]
+    },
+    "send_markdown": {
+      "kind": "file",
+      "risk": "medium",
+      "allowed_roots": [
+        "C:\\tmp\\signal-architecture-plan"
+      ],
+      "allowed_extensions": [
+        ".md"
+      ],
+      "max_bytes": 1048576
+    }
+  }
+}
