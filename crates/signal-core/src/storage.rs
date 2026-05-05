@@ -1,6 +1,7 @@
 use crate::models::{
-    ArtifactMetadata, ContextSnapshot, Event, EventLogEntry, Grant, GrantUse, Message,
-    MessageStatus, OutboxEntry, PushSubscription, Reply, ReplyStatus,
+    ActionApproval, ActionIntent, ActionRun, ArtifactMetadata, ContextSnapshot, DeviceCapability,
+    Event, EventLogEntry, Grant, GrantUse, Message, MessageStatus, OutboxEntry, PushSubscription,
+    Reply, ReplyStatus,
 };
 use rusqlite::{params, Connection, OptionalExtension};
 use sha2::{Digest, Sha256};
@@ -134,6 +135,76 @@ fn grant_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Grant> {
     })
 }
 
+fn device_capability_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<DeviceCapability> {
+    Ok(DeviceCapability {
+        id: row.get(0)?,
+        device_id: row.get(1)?,
+        capability: row.get(2)?,
+        granted_by: row.get(3)?,
+        granted_at: parse_utc(row.get(4)?),
+        expires_at: parse_optional_utc(row.get(5)?),
+        revoked_at: parse_optional_utc(row.get(6)?),
+        metadata_json: row.get(7)?,
+    })
+}
+
+fn action_intent_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ActionIntent> {
+    Ok(ActionIntent {
+        id: row.get(0)?,
+        message_id: row.get(1)?,
+        kind: row.get(2)?,
+        status: row.get(3)?,
+        requested_by_device_id: row.get(4)?,
+        agent_id: row.get(5)?,
+        project: row.get(6)?,
+        profile_id: row.get(7)?,
+        risk: row.get(8)?,
+        required_capability: row.get(9)?,
+        payload_json: row.get(10)?,
+        payload_hash: row.get(11)?,
+        approval_id: row.get(12)?,
+        grant_id: row.get(13)?,
+        created_at: parse_utc(row.get(14)?),
+        updated_at: parse_utc(row.get(15)?),
+        expires_at: parse_optional_utc(row.get(16)?),
+    })
+}
+
+fn action_run_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ActionRun> {
+    Ok(ActionRun {
+        id: row.get(0)?,
+        intent_id: row.get(1)?,
+        worker_id: row.get(2)?,
+        status: row.get(3)?,
+        policy_hash: row.get(4)?,
+        claimed_at: parse_utc(row.get(5)?),
+        lease_until: parse_optional_utc(row.get(6)?),
+        started_at: parse_optional_utc(row.get(7)?),
+        completed_at: parse_optional_utc(row.get(8)?),
+        exit_code: row.get(9)?,
+        stdout_artifact_id: row.get(10)?,
+        stderr_artifact_id: row.get(11)?,
+        output_summary: row.get(12)?,
+        error_json: row.get(13)?,
+    })
+}
+
+fn action_approval_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ActionApproval> {
+    Ok(ActionApproval {
+        id: row.get(0)?,
+        intent_id: row.get(1)?,
+        status: row.get(2)?,
+        nonce_hash: row.get(3)?,
+        nonce_prefix: row.get(4)?,
+        payload_hash: row.get(5)?,
+        requested_at: parse_utc(row.get(6)?),
+        expires_at: parse_utc(row.get(7)?),
+        approved_by_device_id: row.get(8)?,
+        approved_at: parse_optional_utc(row.get(9)?),
+        denied_at: parse_optional_utc(row.get(10)?),
+    })
+}
+
 fn context_snapshot_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ContextSnapshot> {
     Ok(ContextSnapshot {
         id: row.get(0)?,
@@ -192,6 +263,26 @@ fn event_log_select_sql() -> &'static str {
             idempotency_key, correlation_id, causation_id, trace_id, span_id, resource,
             prev_hash, event_hash
      FROM event_log"
+}
+
+fn action_intent_select_sql() -> &'static str {
+    "SELECT id, message_id, kind, status, requested_by_device_id, agent_id, project,
+            profile_id, risk, required_capability, payload_json, payload_hash,
+            approval_id, grant_id, created_at, updated_at, expires_at
+     FROM action_intents"
+}
+
+fn action_run_select_sql() -> &'static str {
+    "SELECT id, intent_id, worker_id, status, policy_hash, claimed_at, lease_until,
+            started_at, completed_at, exit_code, stdout_artifact_id, stderr_artifact_id,
+            output_summary, error_json
+     FROM action_runs"
+}
+
+fn action_approval_select_sql() -> &'static str {
+    "SELECT id, intent_id, status, nonce_hash, nonce_prefix, payload_hash, requested_at,
+            expires_at, approved_by_device_id, approved_at, denied_at
+     FROM action_approvals"
 }
 
 fn compute_event_hash(event: &EventLogEntry, prev_hash: Option<&str>) -> String {
@@ -411,6 +502,88 @@ impl Storage {
         )?;
 
         conn.execute(
+            "CREATE TABLE IF NOT EXISTS device_capabilities (
+                id TEXT PRIMARY KEY,
+                device_id TEXT NOT NULL,
+                capability TEXT NOT NULL,
+                granted_by TEXT NOT NULL,
+                granted_at TEXT NOT NULL,
+                expires_at TEXT,
+                revoked_at TEXT,
+                metadata_json TEXT,
+                FOREIGN KEY (device_id) REFERENCES devices(id)
+            )",
+            [],
+        )?;
+
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS action_intents (
+                id TEXT PRIMARY KEY,
+                message_id TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                status TEXT NOT NULL,
+                requested_by_device_id TEXT,
+                agent_id TEXT,
+                project TEXT,
+                profile_id TEXT,
+                risk TEXT NOT NULL,
+                required_capability TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                payload_hash TEXT NOT NULL,
+                approval_id TEXT,
+                grant_id TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                expires_at TEXT,
+                FOREIGN KEY (message_id) REFERENCES messages(id),
+                FOREIGN KEY (requested_by_device_id) REFERENCES devices(id)
+            )",
+            [],
+        )?;
+
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS action_runs (
+                id TEXT PRIMARY KEY,
+                intent_id TEXT NOT NULL,
+                worker_id TEXT NOT NULL,
+                status TEXT NOT NULL,
+                policy_hash TEXT,
+                claimed_at TEXT NOT NULL,
+                lease_until TEXT,
+                started_at TEXT,
+                completed_at TEXT,
+                exit_code INTEGER,
+                stdout_artifact_id TEXT,
+                stderr_artifact_id TEXT,
+                output_summary TEXT,
+                error_json TEXT,
+                FOREIGN KEY (intent_id) REFERENCES action_intents(id),
+                FOREIGN KEY (stdout_artifact_id) REFERENCES artifacts(id),
+                FOREIGN KEY (stderr_artifact_id) REFERENCES artifacts(id)
+            )",
+            [],
+        )?;
+
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS action_approvals (
+                id TEXT PRIMARY KEY,
+                intent_id TEXT NOT NULL,
+                status TEXT NOT NULL,
+                nonce_hash TEXT NOT NULL,
+                nonce_prefix TEXT NOT NULL,
+                payload_hash TEXT NOT NULL,
+                requested_at TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
+                approved_by_device_id TEXT,
+                approved_at TEXT,
+                denied_at TEXT,
+                FOREIGN KEY (intent_id) REFERENCES action_intents(id),
+                FOREIGN KEY (approved_by_device_id) REFERENCES devices(id)
+            )",
+            [],
+        )?;
+
+        conn.execute(
             "CREATE TABLE IF NOT EXISTS context_snapshots (
                 id TEXT PRIMARY KEY,
                 message_id TEXT NOT NULL,
@@ -547,6 +720,42 @@ impl Storage {
         )?;
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_grant_uses_grant_id ON grant_uses(grant_id)",
+            [],
+        )?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_device_capabilities_device_status
+             ON device_capabilities(device_id, capability, revoked_at, expires_at)",
+            [],
+        )?;
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS ux_device_capabilities_active
+             ON device_capabilities(device_id, capability)
+             WHERE revoked_at IS NULL",
+            [],
+        )?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_action_intents_status
+             ON action_intents(status, created_at)",
+            [],
+        )?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_action_intents_agent_project
+             ON action_intents(agent_id, project, status, created_at)",
+            [],
+        )?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_action_intents_message
+             ON action_intents(message_id)",
+            [],
+        )?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_action_runs_intent
+             ON action_runs(intent_id, claimed_at)",
+            [],
+        )?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_action_approvals_status
+             ON action_approvals(status, expires_at)",
             [],
         )?;
         conn.execute(
@@ -1197,6 +1406,483 @@ impl Storage {
         )?;
 
         Ok(grant_use)
+    }
+
+    pub fn grant_device_capability(
+        &self,
+        capability: &DeviceCapability,
+    ) -> Result<(), StorageError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO device_capabilities (
+                id, device_id, capability, granted_by, granted_at, expires_at,
+                revoked_at, metadata_json
+             )
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+             ON CONFLICT(device_id, capability) WHERE revoked_at IS NULL
+             DO UPDATE SET
+                granted_by = excluded.granted_by,
+                granted_at = excluded.granted_at,
+                expires_at = excluded.expires_at,
+                metadata_json = excluded.metadata_json",
+            params![
+                capability.id,
+                capability.device_id,
+                capability.capability,
+                capability.granted_by,
+                capability.granted_at.to_rfc3339(),
+                capability.expires_at.map(|dt| dt.to_rfc3339()),
+                capability.revoked_at.map(|dt| dt.to_rfc3339()),
+                capability.metadata_json,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_device_capabilities(
+        &self,
+        device_id: &str,
+    ) -> Result<Vec<DeviceCapability>, StorageError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, device_id, capability, granted_by, granted_at, expires_at,
+                    revoked_at, metadata_json
+             FROM device_capabilities
+             WHERE device_id = ?1
+             ORDER BY capability ASC, granted_at DESC",
+        )?;
+        let rows = stmt.query_map(params![device_id], device_capability_from_row)?;
+        let mut capabilities = Vec::new();
+        for row in rows {
+            capabilities.push(row?);
+        }
+        Ok(capabilities)
+    }
+
+    pub fn list_active_device_capabilities(
+        &self,
+        device_id: &str,
+    ) -> Result<Vec<String>, StorageError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT capability
+             FROM device_capabilities
+             WHERE device_id = ?1
+               AND revoked_at IS NULL
+               AND (expires_at IS NULL OR expires_at > ?2)
+             ORDER BY capability ASC",
+        )?;
+        let rows = stmt.query_map(params![device_id, chrono::Utc::now().to_rfc3339()], |row| {
+            row.get::<_, String>(0)
+        })?;
+        let mut capabilities = Vec::new();
+        for row in rows {
+            capabilities.push(row?);
+        }
+        Ok(capabilities)
+    }
+
+    pub fn device_has_capability(
+        &self,
+        device_id: &str,
+        capability: &str,
+    ) -> Result<bool, StorageError> {
+        let conn = self.conn.lock().unwrap();
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*)
+             FROM device_capabilities
+             WHERE device_id = ?1
+               AND capability = ?2
+               AND revoked_at IS NULL
+               AND (expires_at IS NULL OR expires_at > ?3)",
+            params![device_id, capability, chrono::Utc::now().to_rfc3339()],
+            |row| row.get(0),
+        )?;
+        Ok(count > 0)
+    }
+
+    pub fn revoke_device_capability(
+        &self,
+        device_id: &str,
+        capability: &str,
+    ) -> Result<(), StorageError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE device_capabilities
+             SET revoked_at = ?1
+             WHERE device_id = ?2 AND capability = ?3 AND revoked_at IS NULL",
+            params![chrono::Utc::now().to_rfc3339(), device_id, capability],
+        )?;
+        Ok(())
+    }
+
+    pub fn create_action_intent(&self, intent: &ActionIntent) -> Result<(), StorageError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO action_intents (
+                id, message_id, kind, status, requested_by_device_id, agent_id, project,
+                profile_id, risk, required_capability, payload_json, payload_hash,
+                approval_id, grant_id, created_at, updated_at, expires_at
+             )
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+            params![
+                intent.id,
+                intent.message_id,
+                intent.kind,
+                intent.status,
+                intent.requested_by_device_id,
+                intent.agent_id,
+                intent.project,
+                intent.profile_id,
+                intent.risk,
+                intent.required_capability,
+                intent.payload_json,
+                intent.payload_hash,
+                intent.approval_id,
+                intent.grant_id,
+                intent.created_at.to_rfc3339(),
+                intent.updated_at.to_rfc3339(),
+                intent.expires_at.map(|dt| dt.to_rfc3339()),
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_action_intent(&self, id: &str) -> Result<ActionIntent, StorageError> {
+        let conn = self.conn.lock().unwrap();
+        let sql = format!("{} WHERE id = ?1", action_intent_select_sql());
+        conn.query_row(&sql, params![id], action_intent_from_row)
+            .map_err(|_| StorageError::NotFound(format!("Action intent not found: {id}")))
+    }
+
+    pub fn get_action_intent_for_message(
+        &self,
+        message_id: &str,
+    ) -> Result<Option<ActionIntent>, StorageError> {
+        let conn = self.conn.lock().unwrap();
+        let sql = format!(
+            "{} WHERE message_id = ?1 ORDER BY created_at DESC LIMIT 1",
+            action_intent_select_sql()
+        );
+        conn.query_row(&sql, params![message_id], action_intent_from_row)
+            .optional()
+            .map_err(StorageError::Database)
+    }
+
+    pub fn list_action_intents(
+        &self,
+        status: Option<&str>,
+        agent_id: Option<&str>,
+        project: Option<&str>,
+        limit: Option<i64>,
+    ) -> Result<Vec<ActionIntent>, StorageError> {
+        let conn = self.conn.lock().unwrap();
+        let sql = format!(
+            "{} WHERE (?1 IS NULL OR status = ?1)
+                  AND (?2 IS NULL OR agent_id = ?2)
+                  AND (?3 IS NULL OR project = ?3)
+                ORDER BY created_at ASC
+                LIMIT ?4",
+            action_intent_select_sql()
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(
+            params![status, agent_id, project, limit.unwrap_or(50).clamp(1, 500)],
+            action_intent_from_row,
+        )?;
+        let mut actions = Vec::new();
+        for row in rows {
+            actions.push(row?);
+        }
+        Ok(actions)
+    }
+
+    pub fn update_action_status(
+        &self,
+        id: &str,
+        status: &str,
+        approval_id: Option<&str>,
+        grant_id: Option<&str>,
+    ) -> Result<(), StorageError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE action_intents
+             SET status = ?1,
+                 approval_id = COALESCE(?2, approval_id),
+                 grant_id = COALESCE(?3, grant_id),
+                 updated_at = ?4
+             WHERE id = ?5",
+            params![
+                status,
+                approval_id,
+                grant_id,
+                chrono::Utc::now().to_rfc3339(),
+                id
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn claim_action_intent(
+        &self,
+        id: &str,
+        worker_id: &str,
+        policy_hash: Option<&str>,
+        lease_seconds: Option<u64>,
+    ) -> Result<ActionRun, StorageError> {
+        let conn = self.conn.lock().unwrap();
+        let sql = format!("{} WHERE id = ?1", action_intent_select_sql());
+        let intent = conn
+            .query_row(&sql, params![id], action_intent_from_row)
+            .map_err(|_| StorageError::NotFound(format!("Action intent not found: {id}")))?;
+
+        if !matches!(intent.status.as_str(), "pending" | "approved") {
+            return Err(StorageError::PermissionDenied(format!(
+                "Action is not claimable: {}",
+                intent.status
+            )));
+        }
+        if intent
+            .expires_at
+            .is_some_and(|expires_at| chrono::Utc::now() > expires_at)
+        {
+            return Err(StorageError::PermissionDenied(
+                "Action has expired".to_string(),
+            ));
+        }
+
+        let run = ActionRun::new(
+            id.to_string(),
+            worker_id.to_string(),
+            policy_hash.map(|value| value.to_string()),
+            lease_seconds,
+        );
+        let updated = conn.execute(
+            "UPDATE action_intents
+             SET status = 'claimed', updated_at = ?1
+             WHERE id = ?2 AND status IN ('pending', 'approved')",
+            params![chrono::Utc::now().to_rfc3339(), id],
+        )?;
+        if updated != 1 {
+            return Err(StorageError::PermissionDenied(
+                "Action was claimed by another worker".to_string(),
+            ));
+        }
+        conn.execute(
+            "INSERT INTO action_runs (
+                id, intent_id, worker_id, status, policy_hash, claimed_at, lease_until,
+                started_at, completed_at, exit_code, stdout_artifact_id, stderr_artifact_id,
+                output_summary, error_json
+             )
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+            params![
+                run.id,
+                run.intent_id,
+                run.worker_id,
+                run.status,
+                run.policy_hash,
+                run.claimed_at.to_rfc3339(),
+                run.lease_until.map(|dt| dt.to_rfc3339()),
+                run.started_at.map(|dt| dt.to_rfc3339()),
+                run.completed_at.map(|dt| dt.to_rfc3339()),
+                run.exit_code,
+                run.stdout_artifact_id,
+                run.stderr_artifact_id,
+                run.output_summary,
+                run.error_json,
+            ],
+        )?;
+        Ok(run)
+    }
+
+    pub fn mark_action_run_started(&self, run_id: &str) -> Result<ActionRun, StorageError> {
+        let conn = self.conn.lock().unwrap();
+        let now = chrono::Utc::now().to_rfc3339();
+        conn.execute(
+            "UPDATE action_runs SET status = 'running', started_at = ?1 WHERE id = ?2",
+            params![now, run_id],
+        )?;
+        conn.execute(
+            "UPDATE action_intents
+             SET status = 'running', updated_at = ?1
+             WHERE id = (SELECT intent_id FROM action_runs WHERE id = ?2)",
+            params![chrono::Utc::now().to_rfc3339(), run_id],
+        )?;
+        let sql = format!("{} WHERE id = ?1", action_run_select_sql());
+        conn.query_row(&sql, params![run_id], action_run_from_row)
+            .map_err(|_| StorageError::NotFound(format!("Action run not found: {run_id}")))
+    }
+
+    pub fn complete_action_run(
+        &self,
+        run_id: &str,
+        status: &str,
+        exit_code: Option<i64>,
+        output_summary: Option<&str>,
+        error_json: Option<&str>,
+    ) -> Result<ActionRun, StorageError> {
+        let conn = self.conn.lock().unwrap();
+        let now = chrono::Utc::now().to_rfc3339();
+        let intent_status = if status == "succeeded" {
+            "succeeded"
+        } else {
+            "failed"
+        };
+        conn.execute(
+            "UPDATE action_runs
+             SET status = ?1,
+                 completed_at = ?2,
+                 exit_code = ?3,
+                 output_summary = ?4,
+                 error_json = ?5
+             WHERE id = ?6",
+            params![status, now, exit_code, output_summary, error_json, run_id],
+        )?;
+        conn.execute(
+            "UPDATE action_intents
+             SET status = ?1, updated_at = ?2
+             WHERE id = (SELECT intent_id FROM action_runs WHERE id = ?3)",
+            params![intent_status, chrono::Utc::now().to_rfc3339(), run_id],
+        )?;
+        let sql = format!("{} WHERE id = ?1", action_run_select_sql());
+        conn.query_row(&sql, params![run_id], action_run_from_row)
+            .map_err(|_| StorageError::NotFound(format!("Action run not found: {run_id}")))
+    }
+
+    pub fn create_action_approval(&self, approval: &ActionApproval) -> Result<(), StorageError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO action_approvals (
+                id, intent_id, status, nonce_hash, nonce_prefix, payload_hash,
+                requested_at, expires_at, approved_by_device_id, approved_at, denied_at
+             )
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            params![
+                approval.id,
+                approval.intent_id,
+                approval.status,
+                approval.nonce_hash,
+                approval.nonce_prefix,
+                approval.payload_hash,
+                approval.requested_at.to_rfc3339(),
+                approval.expires_at.to_rfc3339(),
+                approval.approved_by_device_id,
+                approval.approved_at.map(|dt| dt.to_rfc3339()),
+                approval.denied_at.map(|dt| dt.to_rfc3339()),
+            ],
+        )?;
+        conn.execute(
+            "UPDATE action_intents
+             SET approval_id = ?1, status = 'awaiting_approval', updated_at = ?2
+             WHERE id = ?3",
+            params![
+                approval.id,
+                chrono::Utc::now().to_rfc3339(),
+                approval.intent_id
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_action_approvals(
+        &self,
+        status: Option<&str>,
+        limit: Option<i64>,
+    ) -> Result<Vec<ActionApproval>, StorageError> {
+        let conn = self.conn.lock().unwrap();
+        let sql = format!(
+            "{} WHERE (?1 IS NULL OR status = ?1)
+                ORDER BY requested_at DESC
+                LIMIT ?2",
+            action_approval_select_sql()
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(
+            params![status, limit.unwrap_or(50).clamp(1, 500)],
+            action_approval_from_row,
+        )?;
+        let mut approvals = Vec::new();
+        for row in rows {
+            approvals.push(row?);
+        }
+        Ok(approvals)
+    }
+
+    pub fn decide_action_approval(
+        &self,
+        id: &str,
+        decision: &str,
+        nonce: Option<&str>,
+        approved_by_device_id: Option<&str>,
+    ) -> Result<ActionApproval, StorageError> {
+        let conn = self.conn.lock().unwrap();
+        let sql = format!("{} WHERE id = ?1", action_approval_select_sql());
+        let approval = conn
+            .query_row(&sql, params![id], action_approval_from_row)
+            .map_err(|_| StorageError::NotFound(format!("Approval not found: {id}")))?;
+
+        if approval.status != "pending" {
+            return Err(StorageError::PermissionDenied(format!(
+                "Approval is not pending: {}",
+                approval.status
+            )));
+        }
+        if approval.expires_at < chrono::Utc::now() {
+            return Err(StorageError::PermissionDenied(
+                "Approval has expired".to_string(),
+            ));
+        }
+
+        let now = chrono::Utc::now().to_rfc3339();
+        match decision {
+            "approve" => {
+                let Some(nonce) = nonce else {
+                    return Err(StorageError::PermissionDenied(
+                        "Approval nonce is required".to_string(),
+                    ));
+                };
+                if crate::hash_token(nonce) != approval.nonce_hash {
+                    return Err(StorageError::PermissionDenied(
+                        "Approval nonce mismatch".to_string(),
+                    ));
+                }
+                conn.execute(
+                    "UPDATE action_approvals
+                     SET status = 'approved', approved_by_device_id = ?1, approved_at = ?2
+                     WHERE id = ?3",
+                    params![approved_by_device_id, now, id],
+                )?;
+                conn.execute(
+                    "UPDATE action_intents
+                     SET status = 'approved', updated_at = ?1
+                     WHERE id = ?2 AND status = 'awaiting_approval'",
+                    params![chrono::Utc::now().to_rfc3339(), approval.intent_id],
+                )?;
+            }
+            "deny" => {
+                conn.execute(
+                    "UPDATE action_approvals
+                     SET status = 'denied', denied_at = ?1
+                     WHERE id = ?2",
+                    params![now, id],
+                )?;
+                conn.execute(
+                    "UPDATE action_intents
+                     SET status = 'denied', updated_at = ?1
+                     WHERE id = ?2",
+                    params![chrono::Utc::now().to_rfc3339(), approval.intent_id],
+                )?;
+            }
+            other => {
+                return Err(StorageError::PermissionDenied(format!(
+                    "Unknown approval decision: {other}"
+                )));
+            }
+        }
+
+        let sql = format!("{} WHERE id = ?1", action_approval_select_sql());
+        conn.query_row(&sql, params![id], action_approval_from_row)
+            .map_err(|_| StorageError::NotFound(format!("Approval not found: {id}")))
     }
 
     pub fn create_context_snapshot(&self, snapshot: &ContextSnapshot) -> Result<(), StorageError> {
@@ -1908,8 +2594,8 @@ impl Storage {
 mod tests {
     use super::*;
     use crate::models::{
-        ArtifactMetadata, ContextSnapshot, Device, EventLogEntry, Grant, Message, PairingCode,
-        PermissionLevel, PushSubscription,
+        ActionIntent, ArtifactMetadata, ContextSnapshot, Device, DeviceCapability, EventLogEntry,
+        Grant, Message, PairingCode, PermissionLevel, PushSubscription,
     };
     use tempfile::NamedTempFile;
 
@@ -2141,6 +2827,99 @@ mod tests {
         assert!(storage
             .use_grant(&grant.id, "agent:codex", "artifacts:write", None, None)
             .is_err());
+    }
+
+    #[test]
+    fn device_capabilities_can_be_granted_and_revoked() {
+        let storage = make_storage();
+        let device = Device::new(
+            "device-cap".to_string(),
+            "phone".to_string(),
+            "phone".to_string(),
+            crate::hash_token("device-token"),
+            "sig_dev_cap".to_string(),
+        );
+        storage.create_device(&device).unwrap();
+        let capability = DeviceCapability::new(
+            device.id.clone(),
+            "agent.wake".to_string(),
+            "test".to_string(),
+        );
+
+        storage.grant_device_capability(&capability).unwrap();
+        assert!(storage
+            .device_has_capability(&device.id, "agent.wake")
+            .unwrap());
+        assert_eq!(
+            storage.list_active_device_capabilities(&device.id).unwrap(),
+            vec!["agent.wake".to_string()]
+        );
+
+        storage
+            .revoke_device_capability(&device.id, "agent.wake")
+            .unwrap();
+        assert!(!storage
+            .device_has_capability(&device.id, "agent.wake")
+            .unwrap());
+    }
+
+    #[test]
+    fn action_intent_claim_and_completion_lifecycle_works() {
+        let storage = make_storage();
+        let device = Device::new(
+            "device-1".to_string(),
+            "phone".to_string(),
+            "phone".to_string(),
+            crate::hash_token("device-token"),
+            "sig_dev_action".to_string(),
+        );
+        storage.create_device(&device).unwrap();
+        let message = make_message("wake", MessageStatus::New, Some("signal"), Some("codex"));
+        storage.create_message(&message).unwrap();
+        let action = ActionIntent::new(
+            message.id.clone(),
+            "wake_agent".to_string(),
+            Some("device-1".to_string()),
+            Some("codex".to_string()),
+            Some("signal".to_string()),
+            None,
+            "low".to_string(),
+            "agent.wake".to_string(),
+            serde_json::json!({"text": "hello"}),
+            Some(60),
+        );
+
+        storage.create_action_intent(&action).unwrap();
+        assert_eq!(
+            storage
+                .list_action_intents(Some("pending"), Some("codex"), Some("signal"), Some(10))
+                .unwrap()
+                .len(),
+            1
+        );
+
+        let run = storage
+            .claim_action_intent(&action.id, "worker-1", Some("policy"), Some(120))
+            .unwrap();
+        assert_eq!(
+            storage.get_action_intent(&action.id).unwrap().status,
+            "claimed"
+        );
+
+        storage.mark_action_run_started(&run.id).unwrap();
+        assert_eq!(
+            storage.get_action_intent(&action.id).unwrap().status,
+            "running"
+        );
+
+        let completed = storage
+            .complete_action_run(&run.id, "succeeded", Some(0), Some("ok"), None)
+            .unwrap();
+        assert_eq!(completed.status, "succeeded");
+        assert_eq!(
+            storage.get_action_intent(&action.id).unwrap().status,
+            "succeeded"
+        );
     }
 
     #[test]

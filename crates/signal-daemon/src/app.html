@@ -528,6 +528,7 @@
                 <div class="panel">
                     <div class="panel-head">
                         <h2>Wake Ping</h2>
+                        <span id="wake-capability-line" class="preview">Checking access</span>
                     </div>
                     <div class="panel-body">
                         <div class="form-grid">
@@ -538,6 +539,23 @@
                             <textarea id="wake-body">hello</textarea>
                             <button id="send-wake" class="primary">Send Ping</button>
                             <div id="wake-status" class="status"></div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="panel">
+                    <div class="panel-head">
+                        <h2>Experimental</h2>
+                        <button id="load-approvals">Approvals</button>
+                    </div>
+                    <div class="panel-body">
+                        <div class="section">
+                            <h3>Device Grants</h3>
+                            <div id="device-capabilities" class="list"></div>
+                        </div>
+                        <div class="section">
+                            <h3>Pending Approvals</h3>
+                            <div id="approval-list" class="list"></div>
                         </div>
                     </div>
                 </div>
@@ -564,6 +582,9 @@
         const notificationStatus = document.getElementById('notification-status');
         const eventList = document.getElementById('event-list');
         const wakeStatus = document.getElementById('wake-status');
+        const wakeCapabilityLine = document.getElementById('wake-capability-line');
+        const deviceCapabilities = document.getElementById('device-capabilities');
+        const approvalList = document.getElementById('approval-list');
         const themeColor = document.getElementById('theme-color');
         const imageViewer = document.getElementById('image-viewer');
         const imageViewerImg = document.getElementById('image-viewer-img');
@@ -572,6 +593,7 @@
         let token = getSignalToken();
         let currentTab = 'inbox';
         let currentMessageId = new URLSearchParams(location.search).get('message');
+        let deviceState = null;
 
         function getSignalToken() {
             const params = new URLSearchParams(location.search);
@@ -663,12 +685,15 @@
                 document.body.classList.add('detail-active');
             }
             if (tab === 'events') loadEvents();
-            if (tab === 'device') refreshDeviceState();
+            if (tab === 'device') {
+                refreshDeviceState();
+                loadApprovals();
+            }
         }
 
         async function loadInbox() {
             token = getSignalToken();
-            refreshDeviceState();
+            await refreshDeviceState();
             if (!token) {
                 showPairingRequired('Pair this device or open the app with a valid token once.');
                 return;
@@ -909,20 +934,23 @@
         }
 
         async function sendWake() {
+            if (deviceState && !hasCapability('agent.wake')) {
+                setStatus(wakeStatus, 'This device is paired in Standard mode. Pair again with Experimental Local Actions to use Wake.', 'error');
+                return;
+            }
             const agent = document.getElementById('wake-agent').value.trim() || 'codex';
             const project = document.getElementById('wake-project').value.trim() || undefined;
             const body = document.getElementById('wake-body').value.trim() || 'hello';
             setStatus(wakeStatus, 'Sending...', '');
-            const response = await guardedFetch('/api/messages', {
+            const response = await guardedFetch('/api/actions', {
                 method: 'POST',
                 headers: authHeaders({ 'Content-Type': 'application/json' }),
                 body: JSON.stringify({
-                    title: 'Wake ' + agent,
+                    kind: 'wake_agent',
                     body,
-                    source: 'pwa',
                     agent_id: agent,
                     project,
-                    permission_level: 'ai_readable'
+                    payload: { text: body }
                 })
             });
             const payload = await parseJsonResponse(response);
@@ -930,18 +958,90 @@
                 setStatus(wakeStatus, payload.message || 'Wake ping failed.', 'error');
                 return;
             }
-            setStatus(wakeStatus, 'Sent: ' + payload.id, 'ok');
+            setStatus(wakeStatus, 'Queued action: ' + payload.action.id, 'ok');
             showTab('inbox');
             await loadInbox();
-            await openMessage(payload.id, true);
+            await openMessage(payload.message.id, true);
         }
 
-        function refreshDeviceState() {
+        function hasCapability(capability) {
+            return !!deviceState && Array.isArray(deviceState.capabilities) && deviceState.capabilities.indexOf(capability) !== -1;
+        }
+
+        async function refreshDeviceState() {
             token = getSignalToken();
             tokenLine.textContent = token ? 'Token: stored' : 'Token: missing';
             if (!notificationStatus.textContent) {
                 notificationStatus.textContent = ('Notification' in window) ? 'Permission: ' + Notification.permission : 'Permission: unknown';
             }
+            if (!token) {
+                deviceState = null;
+                wakeCapabilityLine.textContent = 'Standard only';
+                document.getElementById('send-wake').disabled = true;
+                deviceCapabilities.innerHTML = '<div class="status">Pairing required.</div>';
+                return;
+            }
+            try {
+                const response = await guardedFetch('/api/device/me', { headers: authHeaders() });
+                if (!response.ok) throw new Error('device_state_failed');
+                deviceState = await response.json();
+                tokenLine.textContent = 'Token: ' + deviceState.identity + ' / ' + deviceState.mode;
+                const caps = deviceState.capabilities || [];
+                deviceCapabilities.innerHTML = caps.length
+                    ? caps.map((capability) => '<div class="row"><div class="row-title"><span>' + escapeHtml(capability) + '</span><span class="badge">active</span></div></div>').join('')
+                    : '<div class="status">No active grants.</div>';
+                const canWake = hasCapability('agent.wake') && deviceState.experimental_actions_enabled;
+                document.getElementById('send-wake').disabled = !canWake;
+                wakeCapabilityLine.textContent = canWake ? 'Wake enabled' : 'Wake unavailable';
+                if (!deviceState.experimental_actions_enabled) {
+                    wakeCapabilityLine.textContent = 'Daemon flag disabled';
+                }
+            } catch (error) {
+                deviceState = null;
+                deviceCapabilities.innerHTML = '<div class="status error">' + escapeHtml(error.message || error) + '</div>';
+                document.getElementById('send-wake').disabled = true;
+                wakeCapabilityLine.textContent = 'Wake unavailable';
+            }
+        }
+
+        async function loadApprovals() {
+            if (!token) {
+                approvalList.innerHTML = '<div class="status">Pairing required.</div>';
+                return;
+            }
+            const response = await guardedFetch('/api/approvals?status=pending&limit=20', { headers: authHeaders() });
+            if (!response.ok) {
+                approvalList.innerHTML = '<div class="status">No approval access.</div>';
+                return;
+            }
+            const approvals = await response.json();
+            approvalList.innerHTML = approvals.length ? approvals.map(renderApproval).join('') : '<div class="status">No pending approvals.</div>';
+            approvalList.querySelectorAll('[data-approval-decision]').forEach((button) => {
+                button.addEventListener('click', () => decideApproval(button.dataset.approvalId, button.dataset.approvalDecision));
+            });
+        }
+
+        function renderApproval(approval) {
+            return '<div class="row">' +
+                '<div class="row-title"><span>' + escapeHtml(approval.id) + '</span><span class="badge">' + escapeHtml(approval.status) + '</span></div>' +
+                '<div class="preview">Payload ' + escapeHtml(approval.payload_hash) + '</div>' +
+                '<input id="nonce-' + escapeHtml(approval.id) + '" placeholder="Nonce" inputmode="numeric">' +
+                '<div class="form-grid two"><button data-approval-id="' + escapeHtml(approval.id) + '" data-approval-decision="approve">Approve</button><button data-approval-id="' + escapeHtml(approval.id) + '" data-approval-decision="deny">Deny</button></div>' +
+                '</div>';
+        }
+
+        async function decideApproval(approvalId, decision) {
+            const nonceInput = document.getElementById('nonce-' + approvalId);
+            const response = await guardedFetch('/api/approvals/' + encodeURIComponent(approvalId) + '/decision', {
+                method: 'POST',
+                headers: authHeaders({ 'Content-Type': 'application/json' }),
+                body: JSON.stringify({ decision, nonce: nonceInput ? nonceInput.value.trim() : undefined })
+            });
+            if (!response.ok) {
+                const payload = await parseJsonResponse(response);
+                alert(payload.message || 'Approval failed');
+            }
+            await loadApprovals();
         }
 
         function urlBase64ToUint8Array(base64String) {

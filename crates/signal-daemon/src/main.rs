@@ -40,6 +40,9 @@ struct Args {
     #[arg(long)]
     enable_web_push: bool,
 
+    #[arg(long)]
+    enable_experimental_actions: bool,
+
     #[arg(long, default_value = "./signal_vapid.json")]
     vapid_file: PathBuf,
 
@@ -109,6 +112,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         args.token.clone(),
         args.require_token_for_read,
         args.enable_web_push,
+        args.enable_experimental_actions,
         vapid_config.clone(),
         args.db_path.clone(),
     );
@@ -118,6 +122,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         args.token.clone(),
         args.require_token_for_read,
         args.enable_web_push,
+        args.enable_experimental_actions,
         vapid_config.clone(),
         args.db_path.clone(),
     );
@@ -160,6 +165,7 @@ mod tests {
         assert_eq!(args.db_path, "./signal_demo.db");
         assert!(!args.require_token_for_read);
         assert!(!args.enable_web_push);
+        assert!(!args.enable_experimental_actions);
     }
 
     #[test]
@@ -176,6 +182,7 @@ mod tests {
             "dev-token",
             "--require-token-for-read",
             "--enable-web-push",
+            "--enable-experimental-actions",
             "--public-base-url",
             "https://example.test",
         ]);
@@ -183,6 +190,7 @@ mod tests {
         assert_eq!(args.token.as_deref(), Some("dev-token"));
         assert!(args.require_token_for_read);
         assert!(args.enable_web_push);
+        assert!(args.enable_experimental_actions);
         assert_eq!(
             args.public_base_url.as_deref(),
             Some("https://example.test")

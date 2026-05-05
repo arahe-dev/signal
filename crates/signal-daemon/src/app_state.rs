@@ -20,6 +20,7 @@ pub struct AppState {
     pub token: Option<String>,
     pub require_token_for_read: bool,
     pub enable_web_push: bool,
+    pub enable_experimental_actions: bool,
     pub vapid_config: Option<VapidConfig>,
     pub db_path: String,
 }
@@ -32,6 +33,7 @@ impl AppState {
             token,
             require_token_for_read,
             false,
+            false,
             None,
             String::new(),
         )
@@ -42,6 +44,7 @@ impl AppState {
         token: Option<String>,
         require_token_for_read: bool,
         enable_web_push: bool,
+        enable_experimental_actions: bool,
         vapid_config: Option<VapidConfig>,
         db_path: String,
     ) -> Self {
@@ -50,6 +53,7 @@ impl AppState {
             token,
             require_token_for_read,
             enable_web_push,
+            enable_experimental_actions,
             vapid_config,
             db_path,
         }

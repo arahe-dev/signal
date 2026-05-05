@@ -487,6 +487,180 @@ pub struct GrantUse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeviceCapability {
+    pub id: String,
+    pub device_id: String,
+    pub capability: String,
+    pub granted_by: String,
+    pub granted_at: DateTime<Utc>,
+    pub expires_at: Option<DateTime<Utc>>,
+    pub revoked_at: Option<DateTime<Utc>>,
+    pub metadata_json: Option<String>,
+}
+
+impl DeviceCapability {
+    pub fn new(device_id: String, capability: String, granted_by: String) -> Self {
+        Self {
+            id: Uuid::new_v4().to_string(),
+            device_id,
+            capability,
+            granted_by,
+            granted_at: Utc::now(),
+            expires_at: None,
+            revoked_at: None,
+            metadata_json: None,
+        }
+    }
+
+    pub fn is_active(&self) -> bool {
+        self.revoked_at.is_none()
+            && self
+                .expires_at
+                .map(|expires_at| expires_at > Utc::now())
+                .unwrap_or(true)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ActionIntent {
+    pub id: String,
+    pub message_id: String,
+    pub kind: String,
+    pub status: String,
+    pub requested_by_device_id: Option<String>,
+    pub agent_id: Option<String>,
+    pub project: Option<String>,
+    pub profile_id: Option<String>,
+    pub risk: String,
+    pub required_capability: String,
+    pub payload_json: String,
+    pub payload_hash: String,
+    pub approval_id: Option<String>,
+    pub grant_id: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub expires_at: Option<DateTime<Utc>>,
+}
+
+impl ActionIntent {
+    pub fn new(
+        message_id: String,
+        kind: String,
+        requested_by_device_id: Option<String>,
+        agent_id: Option<String>,
+        project: Option<String>,
+        profile_id: Option<String>,
+        risk: String,
+        required_capability: String,
+        payload: Value,
+        ttl_seconds: Option<u64>,
+    ) -> Self {
+        let now = Utc::now();
+        let payload_json = serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_string());
+        let payload_hash = crate::hash_token(&payload_json);
+        Self {
+            id: Uuid::new_v4().to_string(),
+            message_id,
+            kind,
+            status: "pending".to_string(),
+            requested_by_device_id,
+            agent_id,
+            project,
+            profile_id,
+            risk,
+            required_capability,
+            payload_json,
+            payload_hash,
+            approval_id: None,
+            grant_id: None,
+            created_at: now,
+            updated_at: now,
+            expires_at: ttl_seconds.map(|seconds| now + chrono::Duration::seconds(seconds as i64)),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ActionRun {
+    pub id: String,
+    pub intent_id: String,
+    pub worker_id: String,
+    pub status: String,
+    pub policy_hash: Option<String>,
+    pub claimed_at: DateTime<Utc>,
+    pub lease_until: Option<DateTime<Utc>>,
+    pub started_at: Option<DateTime<Utc>>,
+    pub completed_at: Option<DateTime<Utc>>,
+    pub exit_code: Option<i64>,
+    pub stdout_artifact_id: Option<String>,
+    pub stderr_artifact_id: Option<String>,
+    pub output_summary: Option<String>,
+    pub error_json: Option<String>,
+}
+
+impl ActionRun {
+    pub fn new(
+        intent_id: String,
+        worker_id: String,
+        policy_hash: Option<String>,
+        lease_seconds: Option<u64>,
+    ) -> Self {
+        let now = Utc::now();
+        Self {
+            id: Uuid::new_v4().to_string(),
+            intent_id,
+            worker_id,
+            status: "claimed".to_string(),
+            policy_hash,
+            claimed_at: now,
+            lease_until: lease_seconds
+                .map(|seconds| now + chrono::Duration::seconds(seconds as i64)),
+            started_at: None,
+            completed_at: None,
+            exit_code: None,
+            stdout_artifact_id: None,
+            stderr_artifact_id: None,
+            output_summary: None,
+            error_json: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ActionApproval {
+    pub id: String,
+    pub intent_id: String,
+    pub status: String,
+    pub nonce_hash: String,
+    pub nonce_prefix: String,
+    pub payload_hash: String,
+    pub requested_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+    pub approved_by_device_id: Option<String>,
+    pub approved_at: Option<DateTime<Utc>>,
+    pub denied_at: Option<DateTime<Utc>>,
+}
+
+impl ActionApproval {
+    pub fn new(intent_id: String, nonce: &str, payload_hash: String, ttl_seconds: u64) -> Self {
+        let now = Utc::now();
+        Self {
+            id: Uuid::new_v4().to_string(),
+            intent_id,
+            status: "pending".to_string(),
+            nonce_hash: crate::hash_token(nonce),
+            nonce_prefix: crate::get_token_prefix(nonce),
+            payload_hash,
+            requested_at: now,
+            expires_at: now + chrono::Duration::seconds(ttl_seconds as i64),
+            approved_by_device_id: None,
+            approved_at: None,
+            denied_at: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContextSnapshot {
     pub id: String,
     pub message_id: String,
