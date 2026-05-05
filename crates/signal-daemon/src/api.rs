@@ -7,7 +7,10 @@ use crate::web_push_sender::{
 use axum::{
     body::{Body, Bytes},
     extract::{Path, Query, State},
-    http::{HeaderMap, Response},
+    http::{
+        header::{COOKIE, SET_COOKIE},
+        HeaderMap, HeaderValue, Response,
+    },
     response::{Html, IntoResponse, Json},
     routing::{get, post},
     Router,
@@ -339,6 +342,56 @@ fn token_from_headers(headers: &HeaderMap) -> Option<String> {
                 .and_then(|value| value.strip_prefix("Bearer "))
                 .map(|s| s.to_string())
         })
+        .or_else(|| token_from_cookie(headers))
+}
+
+fn token_from_cookie(headers: &HeaderMap) -> Option<String> {
+    let cookie = headers.get(COOKIE)?.to_str().ok()?;
+    for part in cookie.split(';') {
+        if let Some((name, value)) = part.trim().split_once('=') {
+            if matches!(name, "signal_device_token" | "signal_token") && !value.trim().is_empty() {
+                return Some(value.trim_matches('"').to_string());
+            }
+        }
+    }
+    None
+}
+
+fn request_looks_secure(headers: &HeaderMap) -> bool {
+    headers
+        .get("x-forwarded-proto")
+        .and_then(|value| value.to_str().ok())
+        .map(|value| value.eq_ignore_ascii_case("https"))
+        .unwrap_or(false)
+        || headers
+            .get("origin")
+            .and_then(|value| value.to_str().ok())
+            .map(|value| value.starts_with("https://"))
+            .unwrap_or(false)
+}
+
+fn device_token_cookie(device_token: &str, headers: &HeaderMap) -> String {
+    let secure = if request_looks_secure(headers) {
+        "; Secure"
+    } else {
+        ""
+    };
+    format!(
+        "signal_device_token={}; Path=/; Max-Age=31536000; SameSite=Lax; HttpOnly{}",
+        device_token, secure
+    )
+}
+
+fn expired_cookie(name: &str, headers: &HeaderMap) -> String {
+    let secure = if request_looks_secure(headers) {
+        "; Secure"
+    } else {
+        ""
+    };
+    format!(
+        "{}=; Path=/; Max-Age=0; SameSite=Lax; HttpOnly{}",
+        name, secure
+    )
 }
 
 fn auth_error_response(error: AuthFailure) -> axum::response::Response {
@@ -452,6 +505,7 @@ pub struct PairCompleteResponse {
     pub device_name: String,
     pub mode: String,
     pub capabilities: Vec<String>,
+    pub cookie_auth: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -472,6 +526,11 @@ pub struct UpdateCapabilitiesRequest {
 #[derive(Debug, Serialize)]
 pub struct UpdateCapabilitiesResponse {
     pub capabilities: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ClearLocalPairingResponse {
+    pub success: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -799,7 +858,7 @@ async fn pair_complete(
     State(state): State<AppState>,
     headers: HeaderMap,
     axum::extract::Json(payload): axum::extract::Json<PairCompleteRequest>,
-) -> Result<Json<PairCompleteResponse>, axum::response::Response> {
+) -> Result<axum::response::Response, axum::response::Response> {
     // Get pairing code
     let pairing_code = state
         .storage
@@ -905,13 +964,26 @@ async fn pair_complete(
     event.idempotency_key = Some(format!("signal.device.paired:{}", device_id));
     state.storage.append_event_log(&event).ok();
 
-    Ok(Json(PairCompleteResponse {
+    let mut response = Json(PairCompleteResponse {
         device_id,
-        device_token,
+        device_token: device_token.clone(),
         device_name: device.name,
         mode,
         capabilities,
-    }))
+        cookie_auth: true,
+    })
+    .into_response();
+    response.headers_mut().append(
+        SET_COOKIE,
+        HeaderValue::from_str(&device_token_cookie(&device_token, &headers)).map_err(|e| {
+            make_error_response(
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                "cookie_failed",
+                &format!("Failed to set pairing cookie: {}", e),
+            )
+        })?,
+    );
+    Ok(response)
 }
 
 // Device list/revoke response types
@@ -1209,6 +1281,7 @@ pub fn create_api_router(
             "/api/device/me",
             get(get_device_me).post(update_device_me_capabilities),
         )
+        .route("/api/device/clear-local", post(clear_local_pairing))
         .route("/api/actions", get(list_actions).post(create_action))
         .route("/api/actions/{id}", get(get_action))
         .route("/api/actions/{id}/claim", post(claim_action))
@@ -1326,6 +1399,16 @@ async fn update_device_me_capabilities(
             )
         })?;
     Ok(Json(UpdateCapabilitiesResponse { capabilities }))
+}
+
+async fn clear_local_pairing(headers: HeaderMap) -> axum::response::Response {
+    let mut response = Json(ClearLocalPairingResponse { success: true }).into_response();
+    for name in ["signal_device_token", "signal_token"] {
+        if let Ok(value) = HeaderValue::from_str(&expired_cookie(name, &headers)) {
+            response.headers_mut().append(SET_COOKIE, value);
+        }
+    }
+    response
 }
 
 async fn create_event_log(
@@ -3933,13 +4016,41 @@ async fn pwa_icon_512() -> impl IntoResponse {
 
 #[cfg(test)]
 mod tests {
-    use super::build_diagnostics;
+    use super::{build_diagnostics, token_from_headers};
     use crate::app_state::AppState;
     use crate::web_push_sender::VapidConfig;
+    use axum::http::{
+        header::{AUTHORIZATION, COOKIE},
+        HeaderMap, HeaderValue,
+    };
     use signal_core::models::{Device, PushSubscription};
     use signal_core::{hash_token, Storage};
     use std::sync::Arc;
     use tempfile::NamedTempFile;
+
+    #[test]
+    fn token_from_headers_reads_cookie_fallback_for_home_screen_apps() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            COOKIE,
+            HeaderValue::from_static("theme=dark; signal_device_token=sig_dev_cookie"),
+        );
+        assert_eq!(
+            token_from_headers(&headers).as_deref(),
+            Some("sig_dev_cookie")
+        );
+    }
+
+    #[test]
+    fn explicit_auth_header_wins_over_cookie_fallback() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            COOKIE,
+            HeaderValue::from_static("signal_device_token=cookie"),
+        );
+        headers.insert(AUTHORIZATION, HeaderValue::from_static("Bearer header"));
+        assert_eq!(token_from_headers(&headers).as_deref(), Some("header"));
+    }
 
     #[test]
     fn diagnostics_summary_counts_devices_and_push_state() {
