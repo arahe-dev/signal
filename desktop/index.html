@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Signal</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <section class="sidebar">
+        <header class="app-head">
+          <div>
+            <h1>Signal</h1>
+            <p>Local daemon control</p>
+          </div>
+          <span id="status-pill" class="pill">Idle</span>
+        </header>
+
+        <div class="actions">
+          <button id="start-btn" class="primary">Start</button>
+          <button id="stop-btn">Stop</button>
+          <button id="reload-frame-btn">Reload UI</button>
+        </div>
+
+        <form id="config-form" class="settings">
+          <label>
+            Port
+            <input id="port-input" type="number" min="1" max="65535" />
+          </label>
+          <label>
+            Admin token
+            <input id="token-input" type="password" autocomplete="off" />
+          </label>
+          <label>
+            Public Tailnet URL
+            <input id="public-url-input" type="url" />
+          </label>
+          <label>
+            VAPID contact
+            <input id="vapid-input" type="text" />
+          </label>
+          <label class="check-row">
+            <input id="experimental-input" type="checkbox" />
+            Experimental actions
+          </label>
+          <label class="check-row">
+            <input id="tailscale-refresh-input" type="checkbox" />
+            Refresh Tailscale Serve on start
+          </label>
+          <label class="check-row">
+            <input id="stop-existing-input" type="checkbox" />
+            Stop existing Signal daemons first
+          </label>
+        </form>
+
+        <section class="panel">
+          <h2>Setup</h2>
+          <dl>
+            <div>
+              <dt>Daemon</dt>
+              <dd id="daemon-status">Not checked</dd>
+            </div>
+            <div>
+              <dt>Tailscale</dt>
+              <dd id="tailscale-status">Not checked</dd>
+            </div>
+            <div>
+              <dt>Data</dt>
+              <dd id="data-dir">Not checked</dd>
+            </div>
+          </dl>
+          <div class="row">
+            <button id="tailscale-check-btn">Check</button>
+            <button id="tailscale-install-btn">Install</button>
+            <button id="tailscale-serve-btn">Serve</button>
+          </div>
+        </section>
+
+        <section class="panel links">
+          <h2>Links</h2>
+          <a id="dashboard-link" target="_blank" rel="noreferrer">Dashboard</a>
+          <a id="local-app-link" target="_blank" rel="noreferrer">Local app</a>
+          <a id="phone-link" target="_blank" rel="noreferrer">Phone app</a>
+        </section>
+
+        <section class="panel logs-panel">
+          <div class="panel-head">
+            <h2>Logs</h2>
+            <button id="logs-refresh-btn">Refresh</button>
+          </div>
+          <pre id="logs">No logs yet.</pre>
+        </section>
+      </section>
+
+      <section class="workspace">
+        <div id="empty-state" class="empty">
+          <h2>Start Signal</h2>
+          <p>The local daemon and dashboard will run inside this desktop app.</p>
+        </div>
+        <iframe id="dashboard-frame" title="Signal dashboard"></iframe>
+      </section>
+    </main>
+    <script type="module" src="./main.js"></script>
+  </body>
+</html>

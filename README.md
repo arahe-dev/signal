@@ -24,6 +24,23 @@ Signal uses Tailscale Serve for private HTTPS and browser/Apple Web Push for iPh
 
 ## 5-Minute Windows Quickstart
 
+Desktop wrapper build:
+
+```powershell
+npm install
+npm run tauri:build
+```
+
+Outputs:
+
+```text
+target\release\signal-desktop.exe
+target\release\bundle\msi\Signal_0.1.0_x64_en-US.msi
+target\release\bundle\nsis\Signal_0.1.0_x64-setup.exe
+```
+
+See `docs\DESKTOP_TAURI.md` for desktop release details.
+
 Build the developer-preview release:
 
 ```powershell

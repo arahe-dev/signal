@@ -4,6 +4,7 @@ members = [
     "crates/signal-daemon",
     "crates/signal-cli",
     "crates/signal-worker",
+    "src-tauri",
 ]
 resolver = "2"
 

@@ -1,0 +1,274 @@
+:root {
+  color-scheme: light dark;
+  --bg: #f7f7f4;
+  --surface: #ffffff;
+  --surface-alt: #efefea;
+  --line: #d8d8d0;
+  --text: #202124;
+  --muted: #676b73;
+  --accent: #1b66d2;
+  --accent-strong: #124da3;
+  --green: #1d7a45;
+  --red: #b3261e;
+  --amber: #9a5b00;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #161718;
+    --surface: #202225;
+    --surface-alt: #2b2d31;
+    --line: #3d4047;
+    --text: #f1f3f4;
+    --muted: #a9adb5;
+    --accent: #77a7ff;
+    --accent-strong: #9bbfff;
+    --green: #6cc58f;
+    --red: #ff8a80;
+    --amber: #f0b35b;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background: var(--bg);
+  color: var(--text);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  line-height: 1.45;
+}
+
+button,
+input {
+  font: inherit;
+}
+
+button {
+  min-height: 34px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+  padding: 7px 10px;
+  cursor: pointer;
+}
+
+button.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: white;
+}
+
+button.primary:hover {
+  background: var(--accent-strong);
+}
+
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+input {
+  width: 100%;
+  min-height: 36px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+  padding: 8px 9px;
+}
+
+.shell {
+  display: grid;
+  grid-template-columns: 330px minmax(0, 1fr);
+  min-height: 100vh;
+}
+
+.sidebar {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  height: 100vh;
+  overflow: auto;
+  border-right: 1px solid var(--line);
+  background: var(--surface);
+  padding: 14px;
+}
+
+.app-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: flex-start;
+}
+
+h1,
+h2,
+p {
+  margin: 0;
+}
+
+h1 {
+  font-size: 24px;
+  line-height: 1.1;
+}
+
+h2 {
+  font-size: 14px;
+}
+
+.app-head p,
+dt,
+.links a,
+.settings label {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.pill {
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 4px 9px;
+  color: var(--muted);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.pill.ok {
+  border-color: color-mix(in srgb, var(--green) 50%, var(--line));
+  color: var(--green);
+}
+
+.pill.warn {
+  border-color: color-mix(in srgb, var(--amber) 50%, var(--line));
+  color: var(--amber);
+}
+
+.pill.error {
+  border-color: color-mix(in srgb, var(--red) 50%, var(--line));
+  color: var(--red);
+}
+
+.actions,
+.row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.settings {
+  display: grid;
+  gap: 9px;
+}
+
+.settings label {
+  display: grid;
+  gap: 4px;
+}
+
+.check-row {
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  color: var(--text) !important;
+}
+
+.check-row input {
+  width: 16px;
+  min-height: 16px;
+}
+
+.panel {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-alt);
+  padding: 12px;
+}
+
+.panel-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 8px;
+}
+
+dl {
+  display: grid;
+  gap: 8px;
+  margin: 10px 0 12px;
+}
+
+dl div {
+  display: grid;
+  gap: 2px;
+}
+
+dd {
+  margin: 0;
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.links {
+  display: grid;
+  gap: 8px;
+}
+
+.links a {
+  overflow-wrap: anywhere;
+}
+
+.logs-panel {
+  min-height: 160px;
+}
+
+pre {
+  max-height: 220px;
+  overflow: auto;
+  margin: 0;
+  white-space: pre-wrap;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.workspace {
+  position: relative;
+  min-width: 0;
+  height: 100vh;
+  background: var(--bg);
+}
+
+iframe {
+  display: none;
+  width: 100%;
+  height: 100%;
+  border: 0;
+  background: white;
+}
+
+.workspace.loaded iframe {
+  display: block;
+}
+
+.workspace.loaded .empty {
+  display: none;
+}
+
+.empty {
+  display: grid;
+  place-content: center;
+  height: 100%;
+  gap: 8px;
+  text-align: center;
+  color: var(--muted);
+  padding: 30px;
+}
+
+.empty h2 {
+  color: var(--text);
+  font-size: 20px;
+}

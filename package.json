@@ -1,0 +1,15 @@
+{
+  "name": "signal-desktop",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "tauri": "tauri",
+    "tauri:prepare": "powershell -NoProfile -ExecutionPolicy Bypass -File .\\scripts\\prepare_tauri_sidecars.ps1",
+    "tauri:dev": "npm run tauri:prepare && tauri dev",
+    "tauri:build": "npm run tauri:prepare && tauri build"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "2.11.0"
+  }
+}

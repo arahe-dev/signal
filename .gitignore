@@ -1,5 +1,8 @@
 target/
 dist/
+node_modules/
+src-tauri/binaries/*.exe
+src-tauri/gen/
 *.db
 signal_vapid.json
 signal_vapid*.json
