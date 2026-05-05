@@ -644,7 +644,7 @@
             requestOptions.headers = requestOptions.headers || {};
             const response = await fetch(url, requestOptions);
             if (response.status === 401 || response.status === 403) {
-                const body = await parseJsonResponse(response);
+                const body = await parseJsonResponse(response.clone());
                 if (body.error === 'device_revoked') {
                     showPairingRequired(body.message);
                     throw new Error('device_revoked');
