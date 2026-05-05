@@ -3675,7 +3675,7 @@ async fn dashboard(
             diagnostics
                 .vapid_subject
                 .as_deref()
-                .unwrap_or("mailto:you@example.com")
+                .unwrap_or("not configured")
         ),
         devices_html
     );
@@ -4394,7 +4394,7 @@ mod tests {
             crate::app_state::shared_vapid_config(Some(VapidConfig {
                 private_key: "private".to_string(),
                 public_key: "invalid".to_string(),
-                subject: "mailto:you@example.com".to_string(),
+                subject: "mailto:test@example.invalid".to_string(),
                 public_base_url: Some("https://example.test".to_string()),
             })),
             ".\\test.db".to_string(),

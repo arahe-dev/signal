@@ -19,8 +19,8 @@ $config = @{
     Port = 8790
     Token = "dev-token"
     DbPath = ".\signal_demo_8790.db"
-    PublicBaseUrl = "https://your-device.your-tailnet.ts.net"
-    VapidSubject = "mailto:you@example.com"
+    PublicBaseUrl = ""
+    VapidSubject = ""
 }
 
 if (Test-Path $configFile) {
@@ -41,6 +41,13 @@ if ($Token) { $config.Token = $Token }
 if ($DbPath) { $config.DbPath = $DbPath }
 if ($PublicBaseUrl) { $config.PublicBaseUrl = $PublicBaseUrl }
 if ($VapidSubject) { $config.VapidSubject = $VapidSubject }
+
+if ([string]::IsNullOrWhiteSpace($config.PublicBaseUrl)) {
+    throw "PublicBaseUrl is required. Set signal.config.json public_base_url to your own Tailscale Serve HTTPS URL."
+}
+if ([string]::IsNullOrWhiteSpace($config.VapidSubject)) {
+    throw "VapidSubject is required. Set signal.config.json vapid_subject to a real mailto: email or https: contact URL you control."
+}
 
 function Ensure-TailscaleCli {
     param([switch]$SkipPrompt)

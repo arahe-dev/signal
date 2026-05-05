@@ -46,8 +46,8 @@ struct Args {
     #[arg(long, default_value = "./signal_vapid.json")]
     vapid_file: PathBuf,
 
-    #[arg(long, default_value = "mailto:you@example.com")]
-    vapid_subject: String,
+    #[arg(long)]
+    vapid_subject: Option<String>,
 
     #[arg(long)]
     public_base_url: Option<String>,
@@ -96,26 +96,35 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "VAPID public key loaded: length={}, first_byte=0x{:02x}",
             diagnostics.length, diagnostics.first_byte
         );
-        let mut vapid_subject = args.vapid_subject.clone();
+        let mut vapid_subject = None;
         if let Some(stored_subject) = storage.get_setting("vapid_subject")? {
             match api::validate_vapid_subject(&stored_subject) {
                 Ok(subject) => {
                     info!("Loaded VAPID subject from daemon settings");
-                    vapid_subject = subject;
+                    vapid_subject = Some(subject);
                 }
                 Err(error) => {
-                    warn!(
-                        "Ignoring invalid stored VAPID subject and using CLI/default value: {}",
-                        error
-                    );
+                    warn!("Ignoring invalid stored VAPID subject: {}", error);
                 }
             }
-        } else if let Err(error) = api::validate_vapid_subject(&vapid_subject) {
-            warn!(
-                "Configured VAPID subject may be rejected by push services: {}",
-                error
-            );
         }
+        if vapid_subject.is_none() {
+            if let Some(cli_subject) = &args.vapid_subject {
+                match api::validate_vapid_subject(cli_subject) {
+                    Ok(subject) => vapid_subject = Some(subject),
+                    Err(error) => {
+                        error!("Invalid --vapid-subject: {}", error);
+                        std::process::exit(1);
+                    }
+                }
+            }
+        }
+        let Some(vapid_subject) = vapid_subject else {
+            error!(
+                "Web Push enabled but no VAPID contact is configured. Pass --vapid-subject mailto:<real-email> or save a VAPID contact in dashboard Settings."
+            );
+            std::process::exit(1);
+        };
         Some(web_push_sender::VapidConfig {
             private_key: vapid_keys.private_key,
             public_key: vapid_keys.public_key,
@@ -192,6 +201,7 @@ mod tests {
         assert!(!args.require_token_for_read);
         assert!(!args.enable_web_push);
         assert!(!args.enable_experimental_actions);
+        assert!(args.vapid_subject.is_none());
     }
 
     #[test]
@@ -209,6 +219,8 @@ mod tests {
             "--require-token-for-read",
             "--enable-web-push",
             "--enable-experimental-actions",
+            "--vapid-subject",
+            "mailto:test@example.invalid",
             "--public-base-url",
             "https://example.test",
         ]);
@@ -217,6 +229,10 @@ mod tests {
         assert!(args.require_token_for_read);
         assert!(args.enable_web_push);
         assert!(args.enable_experimental_actions);
+        assert_eq!(
+            args.vapid_subject.as_deref(),
+            Some("mailto:test@example.invalid")
+        );
         assert_eq!(
             args.public_base_url.as_deref(),
             Some("https://example.test")

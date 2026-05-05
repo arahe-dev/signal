@@ -80,7 +80,7 @@ http://127.0.0.1:8791/diagnostics?token=dev-token
 
 ## VAPID Contact
 
-Web Push requires a real contact in the VAPID subject. Signal defaults to `mailto:you@example.com` for local dogfood builds.
+Web Push requires a real contact in the VAPID subject. Signal does not ship a default contact; set your own before enabling push.
 
 Change it from the dashboard Settings card, or set it in `signal.config.json`:
 
@@ -137,6 +137,7 @@ cargo run -p signal-daemon -- `
   --token dev-token `
   --require-token-for-read `
   --enable-web-push `
+  --vapid-subject mailto:name@example.com `
   --public-base-url https://your-device.your-tailnet.ts.net
 ```
 

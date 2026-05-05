@@ -40,8 +40,8 @@ $config = @{
     token = "dev-token"
     require_token_for_read = $true
     enable_web_push = $true
-    public_base_url = "https://your-device.your-tailnet.ts.net"
-    vapid_subject = "mailto:you@example.com"
+    public_base_url = ""
+    vapid_subject = ""
     tailscale_serve = $true
 }
 
@@ -111,10 +111,11 @@ function Ensure-TailscaleCli {
     return $null
 }
 
+if ([string]::IsNullOrWhiteSpace([string]$config.public_base_url)) {
+    throw "public_base_url is required. Set signal.config.json to your own Tailscale Serve HTTPS URL."
+}
 if (-not (Test-VapidSubject ([string]$config.vapid_subject))) {
-    Write-Host "WARNING: vapid_subject should be a real mailto: email or https: contact URL." -ForegroundColor Yellow
-    Write-Host "Current value: $($config.vapid_subject)"
-    Write-Host "You can update it from the dashboard Settings card after the daemon starts."
+    throw "vapid_subject is required and must be a real mailto: email or https: contact URL you control."
 }
 
 if (-not [System.IO.Path]::IsPathRooted([string]$config.db_path)) {

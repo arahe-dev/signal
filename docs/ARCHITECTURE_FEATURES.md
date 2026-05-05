@@ -56,4 +56,4 @@ signal-worker --server http://127.0.0.1:8791 --token dev-token --agent-id codex 
 - Manifest starts at `/app`; auth tokens are not embedded in the manifest or push URLs.
 - Push click-through opens `/app?message=<message-id>`.
 - The app includes inbox, event log, notification controls, local pairing reset, wake pings, dark mode, message detail, replies, context snapshots, and artifact previews.
-- VAPID subject defaults to a real contact address. Override with `--vapid-subject mailto:<real-address>` if this repo is reused.
+- VAPID subject has no shipped personal default. Set `--vapid-subject mailto:<real-address>` or save a contact URL in dashboard Settings.

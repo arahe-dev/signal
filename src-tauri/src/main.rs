@@ -1,6 +1,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use serde::{Deserialize, Serialize};
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 use std::{
     fs,
     path::PathBuf,
@@ -31,8 +33,8 @@ impl Default for DesktopConfig {
         Self {
             port: 8791,
             token: "dev-token".to_string(),
-            public_base_url: "https://your-device.your-tailnet.ts.net".to_string(),
-            vapid_subject: "mailto:you@example.com".to_string(),
+            public_base_url: String::new(),
+            vapid_subject: String::new(),
             enable_experimental_actions: true,
             refresh_tailscale: true,
             stop_existing_signal_daemons: false,
@@ -73,6 +75,17 @@ struct DesktopState {
     daemon: Mutex<Option<ManagedDaemon>>,
     logs: Arc<Mutex<Vec<String>>>,
     last_config: Mutex<Option<DesktopConfig>>,
+    tailscale: Mutex<Option<TailscaleStatus>>,
+}
+
+fn hidden_command(program: &str) -> Command {
+    let mut command = Command::new(program);
+    #[cfg(windows)]
+    {
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    command
 }
 
 fn now_ms() -> u128 {
@@ -109,6 +122,9 @@ fn local_app_url(config: &DesktopConfig) -> String {
 }
 
 fn phone_url(config: &DesktopConfig) -> String {
+    if config.public_base_url.trim().is_empty() {
+        return String::new();
+    }
     format!("{}/app", config.public_base_url.trim_end_matches('/'))
 }
 
@@ -118,6 +134,12 @@ fn validate_config(config: &DesktopConfig) -> Result<(), String> {
     }
     if config.token.trim().is_empty() {
         return Err("Admin token cannot be empty.".to_string());
+    }
+    if config.public_base_url.trim().is_empty() {
+        return Err("Public Tailnet URL is required for phone pairing and Web Push. Use your own Tailscale Serve HTTPS URL.".to_string());
+    }
+    if config.vapid_subject.trim().is_empty() {
+        return Err("VAPID contact is required. Use a real mailto: email or https: contact URL you control.".to_string());
     }
     if !config.vapid_subject.starts_with("mailto:") && !config.vapid_subject.starts_with("https://")
     {
@@ -160,7 +182,7 @@ async fn wait_for_health(port: u16, attempts: usize) -> bool {
 }
 
 fn check_tailscale_inner() -> TailscaleStatus {
-    match Command::new("tailscale").arg("version").output() {
+    match hidden_command("tailscale").arg("version").output() {
         Ok(output) if output.status.success() => {
             let detail = String::from_utf8_lossy(&output.stdout)
                 .lines()
@@ -186,7 +208,7 @@ fn check_tailscale_inner() -> TailscaleStatus {
 fn stop_known_signal_daemons() {
     #[cfg(windows)]
     {
-        let _ = Command::new("taskkill")
+        let _ = hidden_command("taskkill")
             .args(["/IM", "signal-daemon.exe", "/F"])
             .output();
     }
@@ -202,7 +224,7 @@ fn refresh_tailscale_serve_inner(
         logs,
         format!("Refreshing Tailscale Serve: https=443 -> {local}"),
     );
-    let output = Command::new("tailscale")
+    let output = hidden_command("tailscale")
         .args(["serve", "--bg", "--https=443", &local])
         .output()
         .map_err(|e| format!("Unable to run tailscale serve: {e}"))?;
@@ -227,7 +249,15 @@ fn status_from(
     message: impl Into<String>,
 ) -> Result<DesktopStatus, String> {
     let managed = state.daemon.lock().unwrap().is_some();
-    let tailscale = check_tailscale_inner();
+    let tailscale = state
+        .tailscale
+        .lock()
+        .unwrap()
+        .clone()
+        .unwrap_or(TailscaleStatus {
+            installed: false,
+            detail: "Not checked yet.".to_string(),
+        });
     Ok(DesktopStatus {
         running: healthy || managed,
         managed,
@@ -249,14 +279,16 @@ fn default_config() -> DesktopConfig {
 }
 
 #[tauri::command]
-fn check_tailscale() -> TailscaleStatus {
-    check_tailscale_inner()
+fn check_tailscale(state: State<'_, DesktopState>) -> TailscaleStatus {
+    let status = check_tailscale_inner();
+    *state.tailscale.lock().unwrap() = Some(status.clone());
+    status
 }
 
 #[tauri::command]
 fn install_tailscale(state: State<'_, DesktopState>) -> Result<String, String> {
     push_log(&state.logs, "Starting Tailscale installer through winget");
-    Command::new("winget")
+    hidden_command("winget")
         .args([
             "install",
             "--id",
@@ -264,6 +296,8 @@ fn install_tailscale(state: State<'_, DesktopState>) -> Result<String, String> {
             "--exact",
             "--source",
             "winget",
+            "--accept-package-agreements",
+            "--accept-source-agreements",
         ])
         .spawn()
         .map(|_| "Tailscale installer started through winget.".to_string())

@@ -675,7 +675,7 @@ mod tests {
                 body: Some("Custom debug notification from laptop".to_string()),
                 url: Some("/app".to_string()),
             }),
-            Some("https://your-device.your-tailnet.ts.net"),
+            Some("https://signal.example.test"),
         ))
         .unwrap();
 
@@ -708,7 +708,7 @@ mod tests {
                 body: None,
                 url: Some("https://evil.example/app".to_string()),
             }),
-            Some("https://your-device.your-tailnet.ts.net"),
+            Some("https://signal.example.test"),
         ))
         .unwrap();
 
@@ -721,12 +721,12 @@ mod tests {
             Some(TestPushRequest {
                 title: None,
                 body: None,
-                url: Some("https://your-device.your-tailnet.ts.net/app".to_string()),
+                url: Some("https://signal.example.test/app".to_string()),
             }),
-            Some("https://your-device.your-tailnet.ts.net"),
+            Some("https://signal.example.test"),
         ))
         .unwrap();
 
-        assert_eq!(payload["url"], "https://your-device.your-tailnet.ts.net/app");
+        assert_eq!(payload["url"], "https://signal.example.test/app");
     }
 }

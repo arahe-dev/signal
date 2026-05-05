@@ -33,8 +33,8 @@ function configFromForm() {
   return {
     port: Number(els.port.value || 8791),
     token: els.token.value || "dev-token",
-    publicBaseUrl: els.publicUrl.value || "https://your-device.your-tailnet.ts.net",
-    vapidSubject: els.vapid.value || "mailto:you@example.com",
+    publicBaseUrl: els.publicUrl.value.trim(),
+    vapidSubject: els.vapid.value.trim(),
     enableExperimentalActions: els.experimental.checked,
     refreshTailscale: els.tailscaleRefresh.checked,
     stopExistingSignalDaemons: els.stopExisting.checked
@@ -83,8 +83,13 @@ function applyStatus(status) {
   els.dashboardLink.textContent = status.dashboardUrl;
   els.localAppLink.href = status.localAppUrl;
   els.localAppLink.textContent = status.localAppUrl;
-  els.phoneLink.href = status.phoneUrl;
-  els.phoneLink.textContent = status.phoneUrl;
+  if (status.phoneUrl) {
+    els.phoneLink.href = status.phoneUrl;
+    els.phoneLink.textContent = status.phoneUrl;
+  } else {
+    els.phoneLink.removeAttribute("href");
+    els.phoneLink.textContent = "Set Public Tailnet URL";
+  }
 
   if (status.healthy) {
     if (els.frame.src !== status.dashboardUrl) {
