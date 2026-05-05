@@ -1,19 +1,18 @@
 [package]
-name = "signal-cli"
+name = "signal-worker"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
 
 [[bin]]
-name = "signal-cli"
+name = "signal-worker"
 path = "src/main.rs"
 
 [dependencies]
+base64 = { workspace = true }
 clap = { workspace = true }
 reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
-chrono = { workspace = true }
-base64 = { workspace = true }

@@ -4,7 +4,7 @@ use crate::web_push_sender::{
 };
 use axum::{
     extract::State,
-    http::HeaderMap,
+    http::{header::COOKIE, HeaderMap},
     response::Json,
     routing::{get, post},
     Router,
@@ -130,6 +130,19 @@ fn token_from_headers(headers: &HeaderMap) -> Option<String> {
                 .and_then(|value| value.strip_prefix("Bearer "))
                 .map(|s| s.to_string())
         })
+        .or_else(|| token_from_cookie(headers))
+}
+
+fn token_from_cookie(headers: &HeaderMap) -> Option<String> {
+    let cookie = headers.get(COOKIE)?.to_str().ok()?;
+    for part in cookie.split(';') {
+        if let Some((name, value)) = part.trim().split_once('=') {
+            if matches!(name, "signal_device_token" | "signal_token") && !value.trim().is_empty() {
+                return Some(value.trim_matches('"').to_string());
+            }
+        }
+    }
+    None
 }
 
 fn make_error_response(
@@ -624,6 +637,21 @@ mod tests {
         assert_eq!(summary.sent, 0);
         assert_eq!(summary.failed, 0);
         assert_eq!(summary.skipped, 2);
+    }
+
+    #[test]
+    fn push_auth_reads_cookie_fallback_for_installed_pwa() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            COOKIE,
+            "theme=dark; signal_device_token=sig_dev_cookie"
+                .parse()
+                .unwrap(),
+        );
+        assert_eq!(
+            token_from_headers(&headers).as_deref(),
+            Some("sig_dev_cookie")
+        );
     }
 
     #[test]
