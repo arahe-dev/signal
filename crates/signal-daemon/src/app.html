@@ -90,6 +90,10 @@
             line-height: 1.45;
         }
 
+        body.image-viewer-open {
+            overflow: hidden;
+        }
+
         .shell {
             width: min(980px, 100%);
             margin: 0 auto;
@@ -206,6 +210,54 @@
         @media (min-width: 820px) {
             .grid.detail-open {
                 grid-template-columns: minmax(280px, 0.85fr) minmax(0, 1.15fr);
+            }
+        }
+
+        @media (max-width: 819px) {
+            body.detail-active {
+                overflow: hidden;
+            }
+
+            body.detail-active .shell {
+                width: 100%;
+                height: 100vh;
+                padding: 0;
+            }
+
+            body.detail-active header,
+            body.detail-active .tabs,
+            body.detail-active #message-panel {
+                display: none;
+            }
+
+            body.detail-active #inbox-grid {
+                display: block;
+                height: 100vh;
+            }
+
+            body.detail-active #detail-panel {
+                display: grid;
+                grid-template-rows: auto minmax(0, 1fr);
+                width: 100%;
+                min-height: 100vh;
+                border: 0;
+                border-radius: 0;
+                box-shadow: none;
+            }
+
+            body.detail-active #detail-panel .panel-head {
+                position: sticky;
+                top: 0;
+                z-index: 2;
+                background: var(--surface);
+                padding-top: max(12px, env(safe-area-inset-top));
+            }
+
+            body.detail-active #detail-body {
+                overflow: auto;
+                -webkit-overflow-scrolling: touch;
+                padding: 14px;
+                padding-bottom: max(18px, env(safe-area-inset-bottom));
             }
         }
 
@@ -340,6 +392,61 @@
             background: var(--surface-alt);
         }
 
+        .artifact-image-button {
+            display: block;
+            width: 100%;
+            min-height: 0;
+            padding: 0;
+            border: 0;
+            border-radius: 8px;
+            background: transparent;
+        }
+
+        .artifact-image-button img {
+            cursor: zoom-in;
+        }
+
+        .image-viewer {
+            position: fixed;
+            inset: 0;
+            z-index: 50;
+            display: grid;
+            grid-template-rows: auto minmax(0, 1fr);
+            background: rgba(0, 0, 0, 0.94);
+            color: #fff;
+        }
+
+        .image-viewer-bar {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+            padding: max(12px, env(safe-area-inset-top)) 12px 12px;
+        }
+
+        .image-viewer-title {
+            min-width: 0;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            font-size: 14px;
+        }
+
+        .image-viewer button {
+            background: rgba(255, 255, 255, 0.12);
+            border-color: rgba(255, 255, 255, 0.25);
+            color: #fff;
+        }
+
+        .image-viewer img {
+            width: 100%;
+            height: 100%;
+            max-width: 100vw;
+            max-height: calc(100vh - 64px);
+            object-fit: contain;
+            padding: 0 12px max(12px, env(safe-area-inset-bottom));
+        }
+
         .form-grid {
             display: grid;
             gap: 8px;
@@ -370,7 +477,7 @@
 
         <section id="inbox-view">
             <div id="inbox-grid" class="grid">
-                <div class="panel">
+                <div id="message-panel" class="panel">
                     <div class="panel-head">
                         <h2>Inbox</h2>
                         <span id="push-line" class="preview">Push: checking</span>
@@ -438,6 +545,14 @@
         </section>
     </main>
 
+    <div id="image-viewer" class="image-viewer hidden" role="dialog" aria-modal="true" aria-label="Image preview">
+        <div class="image-viewer-bar">
+            <span id="image-viewer-title" class="image-viewer-title">Image</span>
+            <button id="image-viewer-close">Close</button>
+        </div>
+        <img id="image-viewer-img" alt="">
+    </div>
+
     <script>
         const messageList = document.getElementById('message-list');
         const detailPanel = document.getElementById('detail-panel');
@@ -450,6 +565,9 @@
         const eventList = document.getElementById('event-list');
         const wakeStatus = document.getElementById('wake-status');
         const themeColor = document.getElementById('theme-color');
+        const imageViewer = document.getElementById('image-viewer');
+        const imageViewerImg = document.getElementById('image-viewer-img');
+        const imageViewerTitle = document.getElementById('image-viewer-title');
 
         let token = getSignalToken();
         let currentTab = 'inbox';
@@ -540,6 +658,10 @@
             document.getElementById('inbox-view').classList.toggle('hidden', tab !== 'inbox');
             document.getElementById('events-view').classList.toggle('hidden', tab !== 'events');
             document.getElementById('device-view').classList.toggle('hidden', tab !== 'device');
+            if (tab !== 'inbox') document.body.classList.remove('detail-active');
+            if (tab === 'inbox' && currentMessageId && !detailPanel.classList.contains('hidden')) {
+                document.body.classList.add('detail-active');
+            }
             if (tab === 'events') loadEvents();
             if (tab === 'device') refreshDeviceState();
         }
@@ -610,6 +732,7 @@
             }
             detailPanel.classList.remove('hidden');
             inboxGrid.classList.add('detail-open');
+            document.body.classList.add('detail-active');
             detailBody.innerHTML = '<div class="status">Loading message...</div>';
 
             try {
@@ -649,14 +772,39 @@
                 '<div class="section"><h3>Context</h3><div class="list">' + contextItems + '</div></div>';
 
             document.getElementById('send-reply').addEventListener('click', () => sendReply(message.id));
+            detailBody.querySelectorAll('[data-image-url]').forEach((button) => {
+                button.addEventListener('click', () => openImageViewer(button.dataset.imageUrl, button.dataset.imageTitle || 'Image'));
+            });
         }
 
         function renderArtifact(artifact) {
             const contentUrl = '/api/artifacts/' + encodeURIComponent(artifact.id) + '/content' + authQuery();
             const preview = artifact.media_type && artifact.media_type.startsWith('image/')
-                ? '<img src="' + contentUrl + '" alt="' + escapeHtml(artifact.kind) + '">'
+                ? '<button class="artifact-image-button" data-image-url="' + escapeHtml(contentUrl) + '" data-image-title="' + escapeHtml(artifact.kind) + '"><img src="' + contentUrl + '" alt="' + escapeHtml(artifact.kind) + '"></button>'
                 : '<a href="' + contentUrl + '">Open artifact</a>';
             return '<div class="artifact row">' + preview + '<div class="preview">' + escapeHtml(artifact.kind) + ' / ' + escapeHtml(artifact.media_type) + '</div><div class="meta"><span>' + Number(artifact.size_bytes || 0) + ' bytes</span></div></div>';
+        }
+
+        function closeMessageDetail(updateHistory) {
+            currentMessageId = null;
+            detailPanel.classList.add('hidden');
+            inboxGrid.classList.remove('detail-open');
+            document.body.classList.remove('detail-active');
+            if (updateHistory && history.pushState) history.pushState({}, document.title, '/app');
+        }
+
+        function openImageViewer(url, title) {
+            imageViewerTitle.textContent = title || 'Image';
+            imageViewerImg.src = url;
+            imageViewerImg.alt = title || 'Image';
+            imageViewer.classList.remove('hidden');
+            document.body.classList.add('image-viewer-open');
+        }
+
+        function closeImageViewer() {
+            imageViewer.classList.add('hidden');
+            imageViewerImg.removeAttribute('src');
+            document.body.classList.remove('image-viewer-open');
         }
 
         async function sendReply(messageId) {
@@ -827,10 +975,7 @@
             else loadInbox();
         });
         document.getElementById('close-detail').addEventListener('click', () => {
-            currentMessageId = null;
-            detailPanel.classList.add('hidden');
-            inboxGrid.classList.remove('detail-open');
-            if (history.pushState) history.pushState({}, document.title, '/app');
+            closeMessageDetail(true);
         });
         document.getElementById('theme-toggle').addEventListener('click', toggleTheme);
         document.getElementById('load-events').addEventListener('click', loadEvents);
@@ -846,6 +991,16 @@
         window.addEventListener('popstate', () => {
             currentMessageId = new URLSearchParams(location.search).get('message');
             if (currentMessageId) openMessage(currentMessageId, false);
+            else closeMessageDetail(false);
+        });
+        document.getElementById('image-viewer-close').addEventListener('click', closeImageViewer);
+        imageViewer.addEventListener('click', (event) => {
+            if (event.target === imageViewer) closeImageViewer();
+        });
+        window.addEventListener('keydown', (event) => {
+            if (event.key === 'Escape' && !imageViewer.classList.contains('hidden')) {
+                closeImageViewer();
+            }
         });
         navigator.serviceWorker?.addEventListener('message', (event) => {
             if (event.data?.type === 'open-url' && event.data.url) {
