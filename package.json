@@ -6,8 +6,8 @@
   "scripts": {
     "tauri": "tauri",
     "tauri:prepare": "powershell -NoProfile -ExecutionPolicy Bypass -File .\\scripts\\prepare_tauri_sidecars.ps1",
-    "tauri:dev": "npm run tauri:prepare && tauri dev",
-    "tauri:build": "npm run tauri:prepare && tauri build"
+    "tauri:dev": "powershell -NoProfile -ExecutionPolicy Bypass -File .\\scripts\\tauri_dev.ps1",
+    "tauri:build": "powershell -NoProfile -ExecutionPolicy Bypass -File .\\scripts\\tauri_build.ps1"
   },
   "devDependencies": {
     "@tauri-apps/cli": "2.11.0"

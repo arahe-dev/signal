@@ -8,6 +8,7 @@ $repoRoot = Split-Path -Parent $PSScriptRoot
 $binariesDir = Join-Path $repoRoot "src-tauri\binaries"
 
 Set-Location $repoRoot
+. (Join-Path $PSScriptRoot "set_rust_remap.ps1") -RepoRoot $repoRoot
 
 if (-not $TargetTriple) {
     $TargetTriple = (rustc --print host-tuple).Trim()
