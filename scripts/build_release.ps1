@@ -30,8 +30,10 @@ New-Item -ItemType Directory -Path (Join-Path $distSignal "scripts") | Out-Null
 
 Copy-Item -LiteralPath (Join-Path $repoRoot "target\release\signal-daemon.exe") -Destination $distSignal
 Copy-Item -LiteralPath (Join-Path $repoRoot "target\release\signal-cli.exe") -Destination $distSignal
+Copy-Item -LiteralPath (Join-Path $repoRoot "target\release\signal-worker.exe") -Destination $distSignal
 Copy-Item -LiteralPath (Join-Path $repoRoot "README.md") -Destination $distSignal
 Copy-Item -LiteralPath (Join-Path $repoRoot "signal.config.example.json") -Destination $distSignal
+Copy-Item -LiteralPath (Join-Path $repoRoot "signal.worker.policy.example.json") -Destination $distSignal
 Copy-Item -LiteralPath (Join-Path $repoRoot "docs\*.md") -Destination (Join-Path $distSignal "docs")
 Copy-Item -LiteralPath (Join-Path $repoRoot "scripts\start_release.ps1") -Destination (Join-Path $distSignal "scripts")
 Copy-Item -LiteralPath (Join-Path $repoRoot "scripts\smoke_release.ps1") -Destination (Join-Path $distSignal "scripts")

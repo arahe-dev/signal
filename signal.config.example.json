@@ -6,5 +6,6 @@
   "require_token_for_read": true,
   "enable_web_push": true,
   "public_base_url": "https://your-device.your-tailnet.ts.net",
+  "vapid_subject": "mailto:you@example.com",
   "tailscale_serve": true
 }

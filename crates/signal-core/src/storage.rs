@@ -640,6 +640,15 @@ impl Storage {
             [],
         )?;
 
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS app_settings (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )",
+            [],
+        )?;
+
         let _ = conn.execute(
             "ALTER TABLE push_subscriptions ADD COLUMN vapid_public_key_hash TEXT",
             [],
@@ -775,6 +784,31 @@ impl Storage {
         )?;
 
         info!("Database tables initialized");
+        Ok(())
+    }
+
+    pub fn get_setting(&self, key: &str) -> Result<Option<String>, StorageError> {
+        let conn = self.conn.lock().unwrap();
+        let value = conn
+            .query_row(
+                "SELECT value FROM app_settings WHERE key = ?1",
+                params![key],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(value)
+    }
+
+    pub fn set_setting(&self, key: &str, value: &str) -> Result<(), StorageError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO app_settings (key, value, updated_at)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(key) DO UPDATE SET
+                value = excluded.value,
+                updated_at = excluded.updated_at",
+            params![key, value, chrono::Utc::now().to_rfc3339()],
+        )?;
         Ok(())
     }
 
@@ -2621,6 +2655,28 @@ mod tests {
         );
         message.status = status;
         message
+    }
+
+    #[test]
+    fn settings_roundtrip_updates_existing_key() {
+        let storage = make_storage();
+        assert_eq!(storage.get_setting("vapid_subject").unwrap(), None);
+
+        storage
+            .set_setting("vapid_subject", "mailto:first@example.com")
+            .unwrap();
+        assert_eq!(
+            storage.get_setting("vapid_subject").unwrap().as_deref(),
+            Some("mailto:first@example.com")
+        );
+
+        storage
+            .set_setting("vapid_subject", "mailto:second@example.com")
+            .unwrap();
+        assert_eq!(
+            storage.get_setting("vapid_subject").unwrap().as_deref(),
+            Some("mailto:second@example.com")
+        );
     }
 
     #[test]

@@ -435,6 +435,12 @@ struct HealthResponse {
     ok: bool,
 }
 
+#[derive(Debug, Deserialize)]
+struct ApiErrorResponse {
+    error: Option<String>,
+    message: Option<String>,
+}
+
 #[derive(Debug, Deserialize, Serialize, Clone, Default)]
 struct DiagnosticsResponse {
     #[serde(default)]
@@ -447,6 +453,8 @@ struct DiagnosticsResponse {
     public_base_url: Option<String>,
     #[serde(default)]
     web_push_enabled: bool,
+    #[serde(default)]
+    vapid_subject: Option<String>,
     #[serde(default)]
     vapid_public_key_length: Option<usize>,
     #[serde(default)]
@@ -494,6 +502,7 @@ struct DiagnosticsConfig {
     public_base_url: Option<String>,
     web_push_enabled: bool,
     require_token_for_read: bool,
+    vapid_subject: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, Default)]
@@ -502,6 +511,7 @@ struct DiagnosticsVapid {
     public_key_len: Option<usize>,
     public_key_first_byte: Option<u8>,
     private_matches_public: Option<bool>,
+    subject: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, Default)]
@@ -861,7 +871,23 @@ async fn parse_response<T: for<'de> Deserialize<'de>>(
     if !response.status().is_success() {
         let status = response.status();
         let text = response.text().await.unwrap_or_default();
-        return Err(format!("Failed to {}: HTTP {} {}", action, status, text).into());
+        if let Ok(api_error) = serde_json::from_str::<ApiErrorResponse>(&text) {
+            let code = api_error.error.unwrap_or_else(|| "api_error".to_string());
+            let message = api_error
+                .message
+                .unwrap_or_else(|| "The daemon returned an error.".to_string());
+            return Err(format!(
+                "Failed to {}: HTTP {} {} - {}",
+                action, status, code, message
+            )
+            .into());
+        }
+        let detail = if text.trim().is_empty() {
+            "No response body".to_string()
+        } else {
+            text
+        };
+        return Err(format!("Failed to {}: HTTP {} {}", action, status, detail).into());
     }
     Ok(response.json().await?)
 }
@@ -1077,6 +1103,10 @@ fn summarize_doctor(checks: Vec<DoctorCheck>, strict: bool) -> DoctorOutput {
                 "vapid" => suggested_next_steps.push(
                     "Check VAPID config and re-subscribe the phone if keys changed".to_string(),
                 ),
+                "vapid_subject" => suggested_next_steps.push(
+                    "Open dashboard Settings and save a real mailto: email or https: contact URL"
+                        .to_string(),
+                ),
                 "local_daemon" => {
                     suggested_next_steps.push("Start the daemon or check the port".to_string())
                 }
@@ -1107,6 +1137,34 @@ fn evaluate_diagnostics(d: &DiagnosticsResponse) -> Vec<DoctorCheck> {
         checks.push(check("web_push", DoctorStatus::Pass, "enabled"));
     } else {
         checks.push(check("web_push", DoctorStatus::Fail, "disabled"));
+    }
+
+    let vapid_subject = d
+        .vapid_subject
+        .as_deref()
+        .or_else(|| {
+            d.config
+                .as_ref()
+                .and_then(|config| config.vapid_subject.as_deref())
+        })
+        .or_else(|| d.vapid.as_ref().and_then(|vapid| vapid.subject.as_deref()));
+    match vapid_subject {
+        Some(subject) if is_valid_vapid_subject(subject) => {
+            checks.push(check("vapid_subject", DoctorStatus::Pass, subject));
+        }
+        Some(subject) => checks.push(check(
+            "vapid_subject",
+            DoctorStatus::Warn,
+            format!(
+                "Use a real mailto: email or https: URL, current={}",
+                subject
+            ),
+        )),
+        None => checks.push(check(
+            "vapid_subject",
+            DoctorStatus::Warn,
+            "No VAPID subject reported by daemon",
+        )),
     }
 
     let vapid_private_matches = d.vapid.as_ref().and_then(|v| v.private_matches_public);
@@ -1204,6 +1262,18 @@ fn evaluate_diagnostics(d: &DiagnosticsResponse) -> Vec<DoctorCheck> {
         ));
     }
     checks
+}
+
+fn is_valid_vapid_subject(subject: &str) -> bool {
+    if let Some(email) = subject.strip_prefix("mailto:") {
+        return email.matches('@').count() == 1
+            && email
+                .split('@')
+                .nth(1)
+                .map(|domain| domain.contains('.') && !domain.ends_with('.'))
+                .unwrap_or(false);
+    }
+    subject.starts_with("https://") && reqwest::Url::parse(subject).is_ok()
 }
 
 fn evaluate_push_test(response: &PushTestResponse) -> Vec<DoctorCheck> {

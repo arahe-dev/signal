@@ -1,3 +1,4 @@
+use crate::app_state::SharedVapidConfig;
 use crate::web_push_sender::{
     build_generic_payload, send_web_push_to_all_active, vapid_public_key_hash, PushSummary,
     VapidConfig,
@@ -17,7 +18,7 @@ use std::sync::Arc;
 struct PushState {
     storage: Arc<signal_core::Storage>,
     enabled: bool,
-    vapid_config: Option<VapidConfig>,
+    vapid_config: SharedVapidConfig,
     token: Option<String>,
 }
 
@@ -96,7 +97,7 @@ impl PushSelection {
 pub fn create_push_router(
     storage: Arc<signal_core::Storage>,
     enable_web_push: bool,
-    vapid_config: Option<VapidConfig>,
+    vapid_config: SharedVapidConfig,
     token: Option<String>,
 ) -> Router {
     let state = PushState {
@@ -116,6 +117,14 @@ pub fn create_push_router(
             post(clear_stale_subscriptions),
         )
         .with_state(state)
+}
+
+fn current_vapid_config(state: &PushState) -> Option<VapidConfig> {
+    state
+        .vapid_config
+        .read()
+        .ok()
+        .and_then(|guard| guard.clone())
 }
 
 fn token_from_headers(headers: &HeaderMap) -> Option<String> {
@@ -169,7 +178,7 @@ fn authenticate_push(
         return Err(make_error_response(
             axum::http::StatusCode::UNAUTHORIZED,
             "unauthorized",
-            "missing or invalid token",
+            "Missing token. Open the dashboard with ?token=<admin-token> or pair this device again.",
         ));
     };
 
@@ -184,7 +193,7 @@ fn authenticate_push(
             make_error_response(
                 axum::http::StatusCode::UNAUTHORIZED,
                 "unauthorized",
-                "missing or invalid token",
+                "Invalid token. Use the dashboard admin token or pair this device again.",
             )
         })?;
 
@@ -209,7 +218,7 @@ fn authenticate_push_admin(
         Some(_) => Err(make_error_response(
             axum::http::StatusCode::FORBIDDEN,
             "admin_required",
-            "Admin token required",
+            "Admin token required. Reopen the dashboard with the dev/admin token.",
         )),
     }
 }
@@ -338,7 +347,9 @@ async fn subscribe(
     if !state.enabled {
         return Ok(Json(PushSubscriptionResponse {
             success: false,
-            message: Some("Web push is not enabled".to_string()),
+            message: Some(
+                "Web Push is disabled. Start the daemon with --enable-web-push.".to_string(),
+            ),
             summary: None,
         }));
     }
@@ -350,7 +361,7 @@ async fn subscribe(
         None,
     );
     subscription.device_id = device_id;
-    if let Some(config) = &state.vapid_config {
+    if let Some(config) = current_vapid_config(&state) {
         subscription.vapid_public_key_hash = Some(vapid_public_key_hash(&config.public_key));
     }
 
@@ -381,15 +392,17 @@ async fn test_push(
     if !state.enabled {
         return Ok(Json(PushSubscriptionResponse {
             success: false,
-            message: Some("Web push is not enabled".to_string()),
+            message: Some(
+                "Web Push is disabled. Start the daemon with --enable-web-push.".to_string(),
+            ),
             summary: None,
         }));
     }
 
-    let Some(vapid_config) = state.vapid_config.clone() else {
+    let Some(vapid_config) = current_vapid_config(&state) else {
         return Ok(Json(PushSubscriptionResponse {
             success: false,
-            message: Some("VAPID not configured".to_string()),
+            message: Some("VAPID is not configured. Start with --enable-web-push and a valid --vapid-subject.".to_string()),
             summary: None,
         }));
     };
@@ -482,7 +495,7 @@ async fn push_status(
         legacy_unbound_subscriptions: counts.active_legacy,
         total_subscriptions: counts.total,
         web_push_enabled: state.enabled,
-        vapid_configured: state.vapid_config.is_some(),
+        vapid_configured: current_vapid_config(&state).is_some(),
     }))
 }
 
@@ -517,7 +530,7 @@ async fn vapid_public_key(
 ) -> Result<Json<VapidPublicKeyResponse>, axum::response::Response> {
     authenticate_push(&state, &headers)?;
 
-    let Some(config) = state.vapid_config else {
+    let Some(config) = current_vapid_config(&state) else {
         return Err(make_error_response(
             axum::http::StatusCode::SERVICE_UNAVAILABLE,
             "vapid_not_configured",

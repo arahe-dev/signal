@@ -3,7 +3,9 @@ param(
     [string]$Token,
     [string]$DbPath,
     [string]$PublicBaseUrl,
+    [string]$VapidSubject,
     [switch]$NoTailscaleServe,
+    [switch]$SkipTailscaleInstallPrompt,
     [switch]$Release
 )
 
@@ -18,6 +20,7 @@ $config = @{
     Token = "dev-token"
     DbPath = ".\signal_demo_8790.db"
     PublicBaseUrl = "https://your-device.your-tailnet.ts.net"
+    VapidSubject = "mailto:you@example.com"
 }
 
 if (Test-Path $configFile) {
@@ -26,8 +29,10 @@ if (Test-Path $configFile) {
     
     if ($configJson.port) { $config.Port = $configJson.port }
     if ($configJson.admin_token) { $config.Token = $configJson.admin_token }
+    if ($configJson.token) { $config.Token = $configJson.token }
     if ($configJson.db_path) { $config.DbPath = $configJson.db_path }
     if ($configJson.public_base_url) { $config.PublicBaseUrl = $configJson.public_base_url }
+    if ($configJson.vapid_subject) { $config.VapidSubject = $configJson.vapid_subject }
 }
 
 # Override with command-line parameters if provided
@@ -35,6 +40,47 @@ if ($Port) { $config.Port = $Port }
 if ($Token) { $config.Token = $Token }
 if ($DbPath) { $config.DbPath = $DbPath }
 if ($PublicBaseUrl) { $config.PublicBaseUrl = $PublicBaseUrl }
+if ($VapidSubject) { $config.VapidSubject = $VapidSubject }
+
+function Ensure-TailscaleCli {
+    param([switch]$SkipPrompt)
+
+    $tailscale = Get-Command tailscale -ErrorAction SilentlyContinue
+    if ($tailscale) {
+        return $tailscale.Source
+    }
+
+    Write-Host ""
+    Write-Host "Tailscale CLI was not found." -ForegroundColor Yellow
+    Write-Host "Signal can still run locally, but phone pairing/push over your private Tailnet needs Tailscale Serve."
+    if ($SkipPrompt) {
+        Write-Host "Skipping Tailscale install prompt because -SkipTailscaleInstallPrompt was provided."
+        return $null
+    }
+
+    $answer = Read-Host "Install Tailscale now with winget? [Y/n]"
+    if ($answer -match '^(n|no)$') {
+        Write-Host "Skipping Tailscale install. Install later from https://tailscale.com/download/windows"
+        return $null
+    }
+
+    $winget = Get-Command winget -ErrorAction SilentlyContinue
+    if ($winget) {
+        Write-Host "Installing Tailscale with winget..."
+        winget install --id Tailscale.Tailscale --exact --source winget
+        $tailscale = Get-Command tailscale -ErrorAction SilentlyContinue
+        if ($tailscale) {
+            Write-Host "Tailscale CLI installed: $($tailscale.Source)" -ForegroundColor Green
+            return $tailscale.Source
+        }
+        Write-Host "Tailscale installer finished, but tailscale.exe is not on PATH yet. Open a new terminal after login/setup." -ForegroundColor Yellow
+        return $null
+    }
+
+    Write-Host "winget is not available. Opening the Tailscale Windows download page."
+    Start-Process "https://tailscale.com/download/windows"
+    return $null
+}
 
 # Check if port is available
 Write-Host "Checking port $($config.Port) availability..."
@@ -50,13 +96,13 @@ $localUrl = "http://127.0.0.1:$($config.Port)/app?token=$($config.Token)"
 $phoneUrl = "$($config.PublicBaseUrl)/app?token=$($config.Token)"
 
 if (-not $NoTailscaleServe) {
-    $tailscale = Get-Command tailscale -ErrorAction SilentlyContinue
+    $tailscale = Ensure-TailscaleCli -SkipPrompt:$SkipTailscaleInstallPrompt
     if ($tailscale) {
         Write-Host "Refreshing Tailscale Serve: https=443 -> http://127.0.0.1:$($config.Port)"
         tailscale serve --bg --https=443 "http://127.0.0.1:$($config.Port)"
         tailscale serve status
     } else {
-        Write-Host "Tailscale CLI not found; skipping Tailscale Serve refresh."
+        Write-Host "Tailscale Serve refresh skipped."
     }
 }
 
@@ -90,7 +136,7 @@ $daemonArgs = @(
     "--require-token-for-read",
     "--enable-web-push",
     "--vapid-file", ".\signal_vapid.json",
-    "--vapid-subject", "mailto:you@example.com",
+    "--vapid-subject", $config.VapidSubject,
     "--public-base-url", $config.PublicBaseUrl
 )
 

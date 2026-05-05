@@ -18,7 +18,7 @@ Signal uses Tailscale Serve for private HTTPS and browser/Apple Web Push for iPh
 
 - Windows PC
 - Rust toolchain
-- Tailscale on PC and iPhone
+- Tailscale on PC and phone
 - iPhone Safari / Home Screen PWA
 - Same Tailscale tailnet on PC and phone
 
@@ -36,6 +36,8 @@ Start the release build:
 powershell -ExecutionPolicy Bypass -File .\dist\signal\scripts\start_release.ps1 -StopExisting
 ```
 
+If Tailscale is not installed, the start script offers to install it with `winget`. You can skip that prompt with `-NoTailscaleServe` or `-SkipTailscaleInstallPrompt`.
+
 Open the dashboard:
 
 ```text
@@ -51,12 +53,27 @@ http://127.0.0.1:8791/diagnostics?token=dev-token
 ## Pair iPhone
 
 1. Open the dashboard.
-2. Click Start Pairing.
-3. Open the pairing link on the phone you want to pair.
-4. Complete pairing.
-5. Open `/app` on the phone.
-6. Tap Enable Notifications.
-7. Add the app to Home Screen if needed.
+2. Confirm Settings shows a real VAPID contact such as `mailto:name@example.com`.
+3. Click Start Pairing.
+4. Open the pairing link on the phone you want to pair.
+5. Complete pairing.
+6. Open `/app` on the phone.
+7. Tap Enable Notifications.
+8. Add the app to Home Screen if needed.
+
+## VAPID Contact
+
+Web Push requires a real contact in the VAPID subject. Signal defaults to `mailto:you@example.com` for local dogfood builds.
+
+Change it from the dashboard Settings card, or set it in `signal.config.json`:
+
+```json
+{
+  "vapid_subject": "mailto:name@example.com"
+}
+```
+
+Use either a real `mailto:` email address or an `https:` contact URL.
 
 ## Send First Ask
 
@@ -167,7 +184,8 @@ Run public URL and push checks:
 - Push shows legacy/unbound subscriptions: re-enable notifications from the paired phone, or use Test Push when exactly one active device exists so Signal can claim the legacy subscription.
 - iPhone icon or push state looks stale: delete the Home Screen icon, clear Safari website data for the Tailscale host, reopen the phone URL, and add to Home Screen again.
 - Port is in use: start with `-StopExisting` or choose `-Port 8792`.
-- Tailscale CLI missing: start release with `-NoTailscaleServe` and configure Tailscale Serve manually.
+- Tailscale CLI missing: let `start_release.ps1` install it with `winget`, or start with `-NoTailscaleServe` and configure Tailscale Serve manually.
+- VAPID subject rejected: open dashboard Settings and save a real `mailto:` email or `https:` contact URL, then retry notifications.
 
 ## Dogfood
 

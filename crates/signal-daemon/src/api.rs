@@ -1,8 +1,8 @@
-use crate::app_state::{AppState, AuthFailure, AuthIdentity};
+use crate::app_state::{AppState, AuthFailure, AuthIdentity, SharedVapidConfig};
 use crate::html;
 use crate::web_push_sender::{
     build_ask_payload, build_message_payload, build_message_url, private_matches_public,
-    send_web_push_to_all_active, VapidConfig,
+    send_web_push_to_all_active,
 };
 use axum::{
     body::{Body, Bytes},
@@ -209,6 +209,7 @@ pub struct DiagnosticsResponse {
     db_path: String,
     public_base_url: Option<String>,
     web_push_enabled: bool,
+    vapid_subject: Option<String>,
     vapid_public_key_length: Option<usize>,
     vapid_public_key_first_byte: Option<u8>,
     active_devices: usize,
@@ -241,6 +242,7 @@ pub struct DiagnosticsConfig {
     public_base_url: Option<String>,
     web_push_enabled: bool,
     require_token_for_read: bool,
+    vapid_subject: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -249,6 +251,7 @@ pub struct DiagnosticsVapid {
     public_key_len: Option<usize>,
     public_key_first_byte: Option<u8>,
     private_matches_public: Option<bool>,
+    subject: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -276,7 +279,28 @@ pub struct DiagnosticsMessages {
     last_reply_at: Option<String>,
 }
 
+#[derive(Debug, Serialize)]
+pub struct SettingsResponse {
+    vapid_subject: Option<String>,
+    vapid_subject_valid: bool,
+    web_push_enabled: bool,
+    public_base_url: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateVapidSubjectRequest {
+    subject: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct UpdateVapidSubjectResponse {
+    success: bool,
+    message: String,
+    subject: String,
+}
+
 const MAX_ARTIFACT_UPLOAD_BYTES: usize = 10 * 1024 * 1024;
+const VAPID_SUBJECT_SETTING: &str = "vapid_subject";
 
 fn make_error_response(
     status: axum::http::StatusCode,
@@ -308,6 +332,41 @@ fn artifact_root(state: &AppState) -> PathBuf {
             .unwrap_or_else(|| PathBuf::from("."))
     };
     base.join("artifacts")
+}
+
+pub fn validate_vapid_subject(subject: &str) -> Result<String, String> {
+    let subject = subject.trim();
+    if subject.len() > 240 {
+        return Err(
+            "VAPID contact is too long. Use a short mailto: email or https: URL.".to_string(),
+        );
+    }
+    if let Some(email) = subject.strip_prefix("mailto:") {
+        let email = email.trim();
+        let has_one_at = email.matches('@').count() == 1;
+        let has_domain_dot = email
+            .split('@')
+            .nth(1)
+            .map(|domain| {
+                domain.contains('.') && !domain.starts_with('.') && !domain.ends_with('.')
+            })
+            .unwrap_or(false);
+        if has_one_at && has_domain_dot {
+            return Ok(format!("mailto:{email}"));
+        }
+        return Err(
+            "VAPID mailto contact must be a real email, for example mailto:name@example.com."
+                .to_string(),
+        );
+    }
+    if subject.starts_with("https://") {
+        let parsed = reqwest::Url::parse(subject)
+            .map_err(|_| "VAPID https contact must be a valid HTTPS URL.".to_string())?;
+        if parsed.host_str().is_some() {
+            return Ok(parsed.to_string());
+        }
+    }
+    Err("VAPID contact must start with mailto: or https:.".to_string())
 }
 
 fn artifact_file_path(state: &AppState, sha256: &str) -> Option<PathBuf> {
@@ -823,7 +882,7 @@ async fn pair_start(
         });
 
     let public_base_url = state
-        .vapid_config
+        .current_vapid_config()
         .as_ref()
         .and_then(|vc| vc.public_base_url.clone())
         .or(request_base_url)
@@ -1079,6 +1138,7 @@ async fn revoke_device(
 }
 
 fn build_diagnostics(state: &AppState) -> DiagnosticsResponse {
+    let vapid_config = state.current_vapid_config();
     let devices = state.storage.list_devices().unwrap_or_default();
     let active_devices = devices.iter().filter(|device| device.is_active()).count();
     let revoked_devices = devices.len().saturating_sub(active_devices);
@@ -1115,8 +1175,7 @@ fn build_diagnostics(state: &AppState) -> DiagnosticsResponse {
         .list_messages(None, Some(MessageStatus::PendingReply), None, None)
         .map(|messages| messages.len())
         .unwrap_or_default();
-    let (vapid_public_key_length, vapid_public_key_first_byte) = state
-        .vapid_config
+    let (vapid_public_key_length, vapid_public_key_first_byte) = vapid_config
         .as_ref()
         .and_then(|config| {
             base64::Engine::decode(
@@ -1127,12 +1186,11 @@ fn build_diagnostics(state: &AppState) -> DiagnosticsResponse {
         })
         .map(|bytes| (Some(bytes.len()), bytes.first().copied()))
         .unwrap_or((None, None));
-    let public_base_url = state
-        .vapid_config
+    let public_base_url = vapid_config
         .as_ref()
         .and_then(|config| config.public_base_url.clone());
-    let vapid_private_matches_public = state
-        .vapid_config
+    let vapid_subject = vapid_config.as_ref().map(|config| config.subject.clone());
+    let vapid_private_matches_public = vapid_config
         .as_ref()
         .map(|config| private_matches_public(&config.private_key, &config.public_key));
     let suggested_fix = if state.enable_web_push && push_counts.active_bound == 0 {
@@ -1154,12 +1212,14 @@ fn build_diagnostics(state: &AppState) -> DiagnosticsResponse {
         public_base_url: public_base_url.clone(),
         web_push_enabled: state.enable_web_push,
         require_token_for_read: state.require_token_for_read,
+        vapid_subject: vapid_subject.clone(),
     };
     let vapid = DiagnosticsVapid {
-        public_key_present: state.vapid_config.is_some(),
+        public_key_present: vapid_config.is_some(),
         public_key_len: vapid_public_key_length,
         public_key_first_byte: vapid_public_key_first_byte,
         private_matches_public: vapid_private_matches_public,
+        subject: vapid_subject.clone(),
     };
     let devices_nested = DiagnosticsDevices {
         active: active_devices,
@@ -1187,6 +1247,7 @@ fn build_diagnostics(state: &AppState) -> DiagnosticsResponse {
         db_path: state.db_path.clone(),
         public_base_url,
         web_push_enabled: state.enable_web_push,
+        vapid_subject,
         vapid_public_key_length,
         vapid_public_key_first_byte,
         active_devices,
@@ -1213,6 +1274,70 @@ async fn diagnostics(
 ) -> Result<Json<DiagnosticsResponse>, axum::response::Response> {
     check_admin_auth(&state, &headers)?;
     Ok(Json(build_diagnostics(&state)))
+}
+
+fn build_settings_response(state: &AppState) -> SettingsResponse {
+    let vapid_config = state.current_vapid_config();
+    let vapid_subject = vapid_config.as_ref().map(|config| config.subject.clone());
+    let vapid_subject_valid = vapid_subject
+        .as_deref()
+        .map(validate_vapid_subject)
+        .map(|result| result.is_ok())
+        .unwrap_or(false);
+    SettingsResponse {
+        vapid_subject,
+        vapid_subject_valid,
+        web_push_enabled: state.enable_web_push,
+        public_base_url: vapid_config.and_then(|config| config.public_base_url),
+    }
+}
+
+async fn get_settings(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<SettingsResponse>, axum::response::Response> {
+    check_admin_auth(&state, &headers)?;
+    Ok(Json(build_settings_response(&state)))
+}
+
+async fn update_vapid_subject(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<UpdateVapidSubjectRequest>,
+) -> Result<Json<UpdateVapidSubjectResponse>, axum::response::Response> {
+    check_admin_auth(&state, &headers)?;
+    let subject = validate_vapid_subject(&payload.subject).map_err(|message| {
+        make_error_response(
+            axum::http::StatusCode::BAD_REQUEST,
+            "invalid_vapid_subject",
+            &message,
+        )
+    })?;
+    state
+        .storage
+        .set_setting(VAPID_SUBJECT_SETTING, &subject)
+        .map_err(|e| {
+            make_error_response(
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                "settings_save_failed",
+                &format!("Failed to save VAPID contact: {}", e),
+            )
+        })?;
+    state
+        .set_vapid_subject(subject.clone())
+        .map_err(|message| {
+            make_error_response(
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                "vapid_not_configured",
+                &message,
+            )
+        })?;
+
+    Ok(Json(UpdateVapidSubjectResponse {
+        success: true,
+        message: "VAPID contact saved. Future push sends will use this subject.".to_string(),
+        subject,
+    }))
 }
 
 async fn reset_all_devices(
@@ -1248,7 +1373,7 @@ pub fn create_api_router(
     require_token_for_read: bool,
     enable_web_push: bool,
     enable_experimental_actions: bool,
-    vapid_config: Option<VapidConfig>,
+    vapid_config: SharedVapidConfig,
     db_path: String,
 ) -> Router {
     let state = AppState::with_push(
@@ -1302,6 +1427,8 @@ pub fn create_api_router(
         .route("/api/devices/reset-all", post(reset_all_devices))
         .route("/api/devices/{id}/revoke", post(revoke_device))
         .route("/api/diagnostics", get(diagnostics))
+        .route("/api/settings", get(get_settings))
+        .route("/api/settings/vapid-subject", post(update_vapid_subject))
         .with_state(state)
 }
 
@@ -2015,7 +2142,7 @@ async fn create_ask(
     let message_url = build_message_url(
         &message.id,
         state
-            .vapid_config
+            .current_vapid_config()
             .as_ref()
             .and_then(|config| config.public_base_url.as_deref()),
         state.token.as_deref(),
@@ -2122,7 +2249,7 @@ async fn send_message_push_notification(state: &AppState, message: &Message) {
         return;
     }
 
-    let Some(vapid_config) = state.vapid_config.clone() else {
+    let Some(vapid_config) = state.current_vapid_config() else {
         tracing::warn!("Skipping message push because VAPID is not configured");
         return;
     };
@@ -2176,7 +2303,7 @@ async fn send_ask_push_notification(state: &AppState, message: &Message) {
         return;
     }
 
-    let Some(vapid_config) = state.vapid_config.clone() else {
+    let Some(vapid_config) = state.current_vapid_config() else {
         return;
     };
 
@@ -2895,24 +3022,36 @@ async fn dashboard(
         }}
         body {{
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-            background: #f5f5f7;
-            color: #1d1d1f;
+            background: #f7f7f4;
+            color: #202124;
             padding: 20px;
+            line-height: 1.45;
         }}
         .container {{
-            max-width: 900px;
+            max-width: 1040px;
             margin: 0 auto;
+        }}
+        .topbar {{
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 12px;
+            margin-bottom: 18px;
         }}
         h1 {{
             font-size: 28px;
-            margin-bottom: 24px;
+            margin: 0;
+        }}
+        h2 {{
+            font-size: 17px;
+            margin-bottom: 12px;
         }}
         .card {{
             background: white;
-            border-radius: 12px;
+            border: 1px solid #deded8;
+            border-radius: 8px;
             padding: 20px;
             margin-bottom: 16px;
-            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
         }}
         .stats {{
             display: grid;
@@ -2921,9 +3060,9 @@ async fn dashboard(
             margin-bottom: 16px;
         }}
         .stat {{
-            background: #f5f5f7;
+            background: #f0f0eb;
             padding: 16px;
-            border-radius: 10px;
+            border-radius: 8px;
             text-align: center;
         }}
         .stat-value {{
@@ -2948,7 +3087,7 @@ async fn dashboard(
         }}
         .btn {{
             padding: 8px 16px;
-            background: #007aff;
+            background: #1b66d2;
             color: white;
             border: none;
             border-radius: 8px;
@@ -2956,18 +3095,93 @@ async fn dashboard(
             cursor: pointer;
         }}
         .btn:hover {{
-            background: #0051d5;
+            background: #124da3;
+        }}
+        .btn.secondary {{
+            background: #5f6368;
+        }}
+        .btn.danger {{
+            background: #b3261e;
+        }}
+        input, textarea {{
+            width: 100%;
+            padding: 9px 10px;
+            border: 1px solid #d9d9d2;
+            border-radius: 8px;
+            font-size: 14px;
+            background: #fff;
+            color: #202124;
         }}
         .note {{
             font-size: 13px;
-            color: #86868b;
+            color: #676b73;
             margin-top: 16px;
+        }}
+        .field-label {{
+            display:block;
+            font-size:13px;
+            color:#676b73;
+            margin-top:12px;
+            margin-bottom:4px;
+        }}
+        .status-box {{
+            margin-top: 12px;
+            padding: 10px 12px;
+            border-radius: 8px;
+            background: #f0f0eb;
+            color: #202124;
+        }}
+        .status-box.ok {{
+            background: #e8f3ec;
+            color: #1d7a45;
+        }}
+        .status-box.warn {{
+            background: #fff4df;
+            color: #9a5b00;
+        }}
+        .status-box.error {{
+            background: #fdecea;
+            color: #b3261e;
+        }}
+        pre {{
+            white-space: pre-wrap;
+            background: #f0f0eb;
+            padding: 12px;
+            border-radius: 8px;
+            overflow: auto;
+        }}
+        @media (prefers-color-scheme: dark) {{
+            body {{
+                background: #161718;
+                color: #f1f3f4;
+            }}
+            .card {{
+                background: #202225;
+                border-color: #3d4047;
+            }}
+            .stat, .status-box, pre {{
+                background: #2b2d31;
+            }}
+            input, textarea {{
+                background: #202225;
+                border-color: #3d4047;
+                color: #f1f3f4;
+            }}
+            th, tr[style] {{
+                border-color: #3d4047 !important;
+            }}
+            .note, .field-label {{
+                color: #a9adb5;
+            }}
         }}
     </style>
 </head>
 <body>
     <div class="container">
-        <h1>Signal Dashboard</h1>
+        <div class="topbar">
+            <h1>Signal Dashboard</h1>
+            <span class="note">v0.1 dev backend</span>
+        </div>
         
         <div class="card">
             <h2>Status</h2>
@@ -3029,6 +3243,15 @@ async fn dashboard(
             <p class="note">Last Ask/Reply Event: <code>{}</code></p>
             {}
             <p class="note">JSON diagnostics: <code>/api/diagnostics</code> with <code>X-Signal-Token</code>.</p>
+        </div>
+
+        <div class="card">
+            <h2>Settings</h2>
+            <p class="note">VAPID contact is sent to browser push services. Use a real <code>mailto:</code> address or an <code>https:</code> contact URL.</p>
+            <label class="field-label" for="vapid-subject-input">VAPID contact</label>
+            <input type="text" id="vapid-subject-input" value="{}" placeholder="mailto:name@example.com">
+            <button id="save-vapid-subject-btn" class="btn" style="margin-top: 12px;">Save VAPID Contact</button>
+            <div id="settings-status"></div>
         </div>
 
         <div class="card">
@@ -3098,6 +3321,30 @@ async fn dashboard(
             try {{ return text ? JSON.parse(text) : {{}}; }} catch (_) {{ return {{ message: text }}; }}
         }}
 
+        function escapeHtml(value) {{
+            return String(value || '').replace(/[&<>"']/g, (ch) => ({{
+                '&': '&amp;',
+                '<': '&lt;',
+                '>': '&gt;',
+                '"': '&quot;',
+                "'": '&#39;'
+            }}[ch]));
+        }}
+
+        function friendlyError(body, fallback) {{
+            const code = body && body.error;
+            const message = body && body.message;
+            const known = {{
+                unauthorized: 'Missing or invalid admin token. Reopen the dashboard with the dev token.',
+                admin_required: 'This action requires the admin token, not a paired device token.',
+                invalid_vapid_subject: 'Use a real mailto: email or https: contact URL for VAPID.',
+                vapid_not_configured: 'Web Push/VAPID is not enabled for this daemon.',
+                settings_save_failed: 'The daemon could not save settings to SQLite.',
+                storage_error: 'The daemon could not update the local database.'
+            }};
+            return known[code] || message || fallback || 'Request failed.';
+        }}
+
         // Device revocation
         async function revokeDevice(deviceId) {{
             if (!confirm('Are you sure you want to revoke this device?')) {{
@@ -3117,7 +3364,7 @@ async fn dashboard(
                     alert('Device revoked successfully');
                     location.reload();
                 }} else {{
-                    alert('Failed to revoke device: ' + (body.message || response.status));
+                    alert('Failed to revoke device: ' + friendlyError(body, 'HTTP ' + response.status));
                 }}
             }} catch (error) {{
                 alert('Error: ' + error.message);
@@ -3125,6 +3372,36 @@ async fn dashboard(
         }}
 
         document.getElementById('reset-all-devices-btn')?.addEventListener('click', resetAllDevices);
+        document.getElementById('save-vapid-subject-btn')?.addEventListener('click', saveVapidSubject);
+
+        async function saveVapidSubject() {{
+            const statusDiv = document.getElementById('settings-status');
+            const token = getToken();
+            const subject = document.getElementById('vapid-subject-input')?.value || '';
+            if (!token) {{
+                statusDiv.innerHTML = '<div class="status-box error">Missing admin token. Reopen the dashboard with ?token=dev-token.</div>';
+                return;
+            }}
+            statusDiv.innerHTML = '<div class="status-box">Saving VAPID contact...</div>';
+            try {{
+                const response = await fetch('/api/settings/vapid-subject', {{
+                    method: 'POST',
+                    headers: {{
+                        'Content-Type': 'application/json',
+                        'X-Signal-Token': token
+                    }},
+                    body: JSON.stringify({{ subject }})
+                }});
+                const body = await parseJsonResponse(response);
+                if (!response.ok || body.success === false) {{
+                    throw new Error(friendlyError(body, 'HTTP ' + response.status));
+                }}
+                document.getElementById('vapid-subject-input').value = body.subject || subject;
+                statusDiv.innerHTML = '<div class="status-box ok">' + escapeHtml(body.message || 'VAPID contact saved.') + '</div>';
+            }} catch (error) {{
+                statusDiv.innerHTML = '<div class="status-box error">' + escapeHtml(error.message) + '</div>';
+            }}
+        }}
 
         async function resetAllDevices() {{
             const statusDiv = document.getElementById('device-reset-status');
@@ -3133,10 +3410,10 @@ async fn dashboard(
             }}
             const token = getToken();
             if (!token) {{
-                statusDiv.innerHTML = '<div style="color:#c62828;">Missing admin token.</div>';
+                statusDiv.innerHTML = '<div class="status-box error">Missing admin token.</div>';
                 return;
             }}
-            statusDiv.innerHTML = '<div style="color:#007aff;">Resetting devices and subscriptions...</div>';
+            statusDiv.innerHTML = '<div class="status-box">Resetting devices and subscriptions...</div>';
             try {{
                 const response = await fetch('/api/devices/reset-all', {{
                     method: 'POST',
@@ -3144,12 +3421,12 @@ async fn dashboard(
                 }});
                 const body = await parseJsonResponse(response);
                 if (!response.ok || body.success === false) {{
-                    throw new Error(body.message || ('HTTP ' + response.status));
+                    throw new Error(friendlyError(body, 'HTTP ' + response.status));
                 }}
-                statusDiv.innerHTML = '<pre style="white-space:pre-wrap;background:#f5f5f7;padding:12px;border-radius:8px;">' + JSON.stringify(body, null, 2) + '</pre>';
+                statusDiv.innerHTML = '<pre>' + escapeHtml(JSON.stringify(body, null, 2)) + '</pre>';
                 setTimeout(() => location.reload(), 1200);
             }} catch (error) {{
-                statusDiv.innerHTML = '<div style="color:#c62828;">Reset failed: ' + error.message + '</div>';
+                statusDiv.innerHTML = '<div class="status-box error">Reset failed: ' + escapeHtml(error.message) + '</div>';
             }}
         }}
 
@@ -3160,10 +3437,10 @@ async fn dashboard(
             const statusDiv = document.getElementById('push-test-status');
             const token = getToken();
             if (!token) {{
-                statusDiv.innerHTML = '<div style="color:#c62828;">Missing admin token.</div>';
+                statusDiv.innerHTML = '<div class="status-box error">Missing admin token.</div>';
                 return;
             }}
-            statusDiv.innerHTML = '<div style="color:#007aff;">Sending test push...</div>';
+            statusDiv.innerHTML = '<div class="status-box">Sending test push...</div>';
             try {{
                 const payload = {{
                     title: document.getElementById('push-title-input')?.value || 'Signal test',
@@ -3180,23 +3457,23 @@ async fn dashboard(
                 }});
                 const body = await parseJsonResponse(response);
                 if (!response.ok) {{
-                    throw new Error(body.message || ('HTTP ' + response.status));
+                    throw new Error(friendlyError(body, 'HTTP ' + response.status));
                 }}
-                const color = body.success === false ? '#c77c02' : '#2e7d32';
+                const statusClass = body.success === false ? 'warn' : 'ok';
                 let reason = '';
                 if (body.summary && body.summary.attempted === 0) {{
                     if (body.summary.skipped_legacy > 0) {{
-                        reason = '<div style="color:#c77c02;margin-top:6px;">No active device-bound subscription. Enable notifications from the paired phone, or re-pair and enable notifications.</div>';
+                        reason = '<div class="status-box warn">No active device-bound subscription. Enable notifications from the paired phone, or re-pair and enable notifications.</div>';
                     }} else if (body.summary.skipped_revoked > 0) {{
-                        reason = '<div style="color:#c77c02;margin-top:6px;">Only revoked subscriptions were found. Pair a phone and enable notifications again.</div>';
+                        reason = '<div class="status-box warn">Only revoked subscriptions were found. Pair a phone and enable notifications again.</div>';
                     }} else {{
-                        reason = '<div style="color:#c77c02;margin-top:6px;">No active subscriptions are registered yet.</div>';
+                        reason = '<div class="status-box warn">No active subscriptions are registered yet.</div>';
                     }}
                 }}
-                statusDiv.innerHTML = '<div style="color:' + color + ';">' + (body.message || 'Push test completed') + '</div>' + reason +
-                    '<pre style="white-space:pre-wrap;background:#f5f5f7;padding:12px;border-radius:8px;margin-top:8px;">' + JSON.stringify(body, null, 2) + '</pre>';
+                statusDiv.innerHTML = '<div class="status-box ' + statusClass + '">' + escapeHtml(body.message || 'Push test completed') + '</div>' + reason +
+                    '<pre>' + escapeHtml(JSON.stringify(body, null, 2)) + '</pre>';
             }} catch (error) {{
-                statusDiv.innerHTML = '<div style="color:#c62828;">Push failed: ' + error.message + '</div>';
+                statusDiv.innerHTML = '<div class="status-box error">Push failed: ' + escapeHtml(error.message) + '</div>';
             }}
         }}
 
@@ -3204,13 +3481,13 @@ async fn dashboard(
             const statusDiv = document.getElementById('push-test-status');
             const token = getToken();
             if (!token) {{
-                statusDiv.innerHTML = '<div style="color:#c62828;">Missing admin token.</div>';
+                statusDiv.innerHTML = '<div class="status-box error">Missing admin token.</div>';
                 return;
             }}
             if (!confirm('This will delete stale, revoked, and legacy/unbound push subscriptions. Devices, messages, and replies are kept. Continue?')) {{
                 return;
             }}
-            statusDiv.innerHTML = '<div style="color:#007aff;">Clearing stale and legacy subscriptions...</div>';
+            statusDiv.innerHTML = '<div class="status-box">Clearing stale and legacy subscriptions...</div>';
             try {{
                 const response = await fetch('/api/push/subscriptions/clear-stale', {{
                     method: 'POST',
@@ -3218,13 +3495,13 @@ async fn dashboard(
                 }});
                 const body = await parseJsonResponse(response);
                 if (!response.ok || body.success === false) {{
-                    throw new Error(body.message || ('HTTP ' + response.status));
+                    throw new Error(friendlyError(body, 'HTTP ' + response.status));
                 }}
-                statusDiv.innerHTML = '<div style="color:#2e7d32;">Inactive push subscriptions cleared.</div>' +
-                    '<pre style="white-space:pre-wrap;background:#f5f5f7;padding:12px;border-radius:8px;margin-top:8px;">' + JSON.stringify(body, null, 2) + '</pre>';
+                statusDiv.innerHTML = '<div class="status-box ok">Inactive push subscriptions cleared.</div>' +
+                    '<pre>' + escapeHtml(JSON.stringify(body, null, 2)) + '</pre>';
                 setTimeout(() => location.reload(), 1200);
             }} catch (error) {{
-                statusDiv.innerHTML = '<div style="color:#c62828;">Clear stale failed: ' + error.message + '</div>';
+                statusDiv.innerHTML = '<div class="status-box error">Clear stale failed: ' + escapeHtml(error.message) + '</div>';
             }}
         }}
 
@@ -3394,6 +3671,12 @@ async fn dashboard(
                 .unwrap_or("none")
         ),
         suggested_fix_html,
+        escape_html(
+            diagnostics
+                .vapid_subject
+                .as_deref()
+                .unwrap_or("mailto:you@example.com")
+        ),
         devices_html
     );
 
@@ -3756,7 +4039,7 @@ pub fn create_html_router(
     require_token_for_read: bool,
     enable_web_push: bool,
     enable_experimental_actions: bool,
-    vapid_config: Option<VapidConfig>,
+    vapid_config: SharedVapidConfig,
     db_path: String,
 ) -> Router {
     Router::new()
@@ -4016,7 +4299,7 @@ async fn pwa_icon_512() -> impl IntoResponse {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_diagnostics, token_from_headers};
+    use super::{build_diagnostics, token_from_headers, validate_vapid_subject};
     use crate::app_state::AppState;
     use crate::web_push_sender::VapidConfig;
     use axum::http::{
@@ -4050,6 +4333,17 @@ mod tests {
         );
         headers.insert(AUTHORIZATION, HeaderValue::from_static("Bearer header"));
         assert_eq!(token_from_headers(&headers).as_deref(), Some("header"));
+    }
+
+    #[test]
+    fn vapid_subject_validation_requires_real_contact_shape() {
+        assert_eq!(
+            validate_vapid_subject("mailto:person@example.com").unwrap(),
+            "mailto:person@example.com"
+        );
+        assert!(validate_vapid_subject("mailto:not-real").is_err());
+        assert!(validate_vapid_subject("http://example.com/contact").is_err());
+        assert!(validate_vapid_subject("https://example.com/contact").is_ok());
     }
 
     #[test]
@@ -4097,12 +4391,12 @@ mod tests {
             true,
             true,
             false,
-            Some(VapidConfig {
+            crate::app_state::shared_vapid_config(Some(VapidConfig {
                 private_key: "private".to_string(),
                 public_key: "invalid".to_string(),
                 subject: "mailto:you@example.com".to_string(),
                 public_base_url: Some("https://example.test".to_string()),
-            }),
+            })),
             ".\\test.db".to_string(),
         );
 

@@ -96,16 +96,37 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "VAPID public key loaded: length={}, first_byte=0x{:02x}",
             diagnostics.length, diagnostics.first_byte
         );
+        let mut vapid_subject = args.vapid_subject.clone();
+        if let Some(stored_subject) = storage.get_setting("vapid_subject")? {
+            match api::validate_vapid_subject(&stored_subject) {
+                Ok(subject) => {
+                    info!("Loaded VAPID subject from daemon settings");
+                    vapid_subject = subject;
+                }
+                Err(error) => {
+                    warn!(
+                        "Ignoring invalid stored VAPID subject and using CLI/default value: {}",
+                        error
+                    );
+                }
+            }
+        } else if let Err(error) = api::validate_vapid_subject(&vapid_subject) {
+            warn!(
+                "Configured VAPID subject may be rejected by push services: {}",
+                error
+            );
+        }
         Some(web_push_sender::VapidConfig {
             private_key: vapid_keys.private_key,
             public_key: vapid_keys.public_key,
-            subject: args.vapid_subject.clone(),
+            subject: vapid_subject,
             public_base_url: args.public_base_url.clone(),
         })
     } else {
         info!("Web Push disabled");
         None
     };
+    let vapid_config = app_state::shared_vapid_config(vapid_config);
 
     let html_router = api::create_html_router(
         storage.clone(),
@@ -128,7 +149,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     let push_router = if args.enable_web_push {
-        push::create_push_router(storage.clone(), true, vapid_config, args.token.clone())
+        push::create_push_router(
+            storage.clone(),
+            true,
+            vapid_config.clone(),
+            args.token.clone(),
+        )
     } else {
         Router::new()
     };

@@ -27,6 +27,8 @@ cargo run -p signal-daemon -- `
   --public-base-url https://your-device.your-tailnet.ts.net
 ```
 
+For release builds, you can update the contact from the dashboard Settings card without editing command-line flags. The daemon saves it in SQLite and applies it to future push sends immediately.
+
 The daemon exposes the active VAPID public key at `/api/push/vapid-public-key`. The PWA uses that key when creating browser subscriptions, so after changing VAPID keys you must delete the old Home Screen app, clear Safari website data, reinstall the PWA, and tap Enable Notifications again.
 
 If `/api/push/test` returns `subscription_vapid_key_mismatch_resubscribe_required`, the PWA subscription was created with a different VAPID key. Delete the Home Screen PWA, clear website data for the Tailscale URL, reinstall the PWA, and tap Enable Notifications again.

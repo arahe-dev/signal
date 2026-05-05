@@ -1,6 +1,12 @@
 use crate::web_push_sender::VapidConfig;
 use signal_core::Storage;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
+
+pub type SharedVapidConfig = Arc<RwLock<Option<VapidConfig>>>;
+
+pub fn shared_vapid_config(config: Option<VapidConfig>) -> SharedVapidConfig {
+    Arc::new(RwLock::new(config))
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum AuthIdentity {
@@ -21,7 +27,7 @@ pub struct AppState {
     pub require_token_for_read: bool,
     pub enable_web_push: bool,
     pub enable_experimental_actions: bool,
-    pub vapid_config: Option<VapidConfig>,
+    pub vapid_config: SharedVapidConfig,
     pub db_path: String,
 }
 
@@ -34,7 +40,7 @@ impl AppState {
             require_token_for_read,
             false,
             false,
-            None,
+            shared_vapid_config(None),
             String::new(),
         )
     }
@@ -45,7 +51,7 @@ impl AppState {
         require_token_for_read: bool,
         enable_web_push: bool,
         enable_experimental_actions: bool,
-        vapid_config: Option<VapidConfig>,
+        vapid_config: SharedVapidConfig,
         db_path: String,
     ) -> Self {
         Self {
@@ -57,6 +63,25 @@ impl AppState {
             vapid_config,
             db_path,
         }
+    }
+
+    pub fn current_vapid_config(&self) -> Option<VapidConfig> {
+        self.vapid_config
+            .read()
+            .ok()
+            .and_then(|guard| guard.clone())
+    }
+
+    pub fn set_vapid_subject(&self, subject: String) -> Result<(), String> {
+        let mut guard = self
+            .vapid_config
+            .write()
+            .map_err(|_| "VAPID settings lock is unavailable".to_string())?;
+        let Some(config) = guard.as_mut() else {
+            return Err("Web Push/VAPID is not configured".to_string());
+        };
+        config.subject = subject;
+        Ok(())
     }
 
     pub fn authenticate_token(&self, token: &str) -> Result<AuthIdentity, AuthFailure> {
