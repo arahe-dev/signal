@@ -43,7 +43,7 @@ struct Args {
     #[arg(long, default_value = "./signal_vapid.json")]
     vapid_file: PathBuf,
 
-    #[arg(long, default_value = "mailto:signal@example.local")]
+    #[arg(long, default_value = "mailto:araheemimami@gmail.com")]
     vapid_subject: String,
 
     #[arg(long)]

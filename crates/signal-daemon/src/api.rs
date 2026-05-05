@@ -5,20 +5,24 @@ use crate::web_push_sender::{
     send_web_push_to_all_active, VapidConfig,
 };
 use axum::{
-    body::Bytes,
+    body::{Body, Bytes},
     extract::{Path, Query, State},
     http::{HeaderMap, Response},
     response::{Html, IntoResponse, Json},
     routing::{get, post},
     Router,
 };
+use base64::Engine as _;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use sha2::{Digest, Sha256};
 use signal_core::{
     events::{create_message_event, create_reply_consumed_event, create_reply_event},
     models::*,
     Storage,
 };
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::time::{sleep, Duration, Instant};
 use tracing::info;
@@ -30,6 +34,12 @@ pub struct ListMessagesQuery {
     status: Option<String>,
     project: Option<String>,
     agent_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ListEventsQuery {
+    after_seq: Option<i64>,
+    limit: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -47,6 +57,124 @@ pub struct ErrorResponse {
 #[derive(Debug, Deserialize)]
 pub struct WaitQuery {
     timeout_seconds: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CreateContextSnapshotRequest {
+    pub source: String,
+    pub stage: String,
+    #[serde(default)]
+    pub status: Value,
+    pub repo_root_hash: Option<String>,
+    pub repo_root_display: Option<String>,
+    pub git_common_dir_hash: Option<String>,
+    pub worktree_id: Option<String>,
+    pub worktree_path_display: Option<String>,
+    pub branch: Option<String>,
+    pub head_oid: Option<String>,
+    pub upstream: Option<String>,
+    pub ahead: Option<i64>,
+    pub behind: Option<i64>,
+    pub dirty: Option<bool>,
+    pub staged_count: Option<i64>,
+    pub unstaged_count: Option<i64>,
+    pub untracked_count: Option<i64>,
+    pub worktrees: Option<Value>,
+    pub staged_patch_id: Option<String>,
+    pub staged_patch_sha256: Option<String>,
+    pub unstaged_patch_id: Option<String>,
+    pub unstaged_patch_sha256: Option<String>,
+    pub post_commit_oid: Option<String>,
+    pub expires_at: Option<chrono::DateTime<Utc>>,
+    pub pinned: Option<bool>,
+}
+
+impl CreateContextSnapshotRequest {
+    fn into_snapshot(self, message_id: String) -> ContextSnapshot {
+        let mut snapshot = ContextSnapshot::new(
+            message_id,
+            self.source,
+            self.stage,
+            serde_json::to_string(&self.status).unwrap_or_else(|_| "{}".to_string()),
+        );
+        snapshot.repo_root_hash = self.repo_root_hash;
+        snapshot.repo_root_display = self.repo_root_display;
+        snapshot.git_common_dir_hash = self.git_common_dir_hash;
+        snapshot.worktree_id = self.worktree_id;
+        snapshot.worktree_path_display = self.worktree_path_display;
+        snapshot.branch = self.branch;
+        snapshot.head_oid = self.head_oid;
+        snapshot.upstream = self.upstream;
+        snapshot.ahead = self.ahead;
+        snapshot.behind = self.behind;
+        snapshot.dirty = self.dirty.unwrap_or(false);
+        snapshot.staged_count = self.staged_count.unwrap_or(0);
+        snapshot.unstaged_count = self.unstaged_count.unwrap_or(0);
+        snapshot.untracked_count = self.untracked_count.unwrap_or(0);
+        snapshot.worktrees_json = self
+            .worktrees
+            .map(|value| serde_json::to_string(&value).unwrap_or_else(|_| "[]".to_string()));
+        snapshot.staged_patch_id = self.staged_patch_id;
+        snapshot.staged_patch_sha256 = self.staged_patch_sha256;
+        snapshot.unstaged_patch_id = self.unstaged_patch_id;
+        snapshot.unstaged_patch_sha256 = self.unstaged_patch_sha256;
+        snapshot.post_commit_oid = self.post_commit_oid;
+        snapshot.expires_at = self.expires_at;
+        snapshot.pinned = self.pinned.unwrap_or(false);
+        snapshot
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CreateArtifactMetadataRequest {
+    pub message_id: String,
+    pub snapshot_id: Option<String>,
+    pub kind: String,
+    pub media_type: String,
+    pub sha256: String,
+    pub size_bytes: i64,
+    pub storage_uri: String,
+    pub width: Option<i64>,
+    pub height: Option<i64>,
+    pub expires_at: Option<chrono::DateTime<Utc>>,
+    pub pinned: Option<bool>,
+    pub metadata: Option<Value>,
+}
+
+impl CreateArtifactMetadataRequest {
+    fn into_artifact(self) -> ArtifactMetadata {
+        let mut artifact = ArtifactMetadata::new(
+            self.message_id,
+            self.kind,
+            self.media_type,
+            self.sha256,
+            self.size_bytes,
+            self.storage_uri,
+        );
+        artifact.snapshot_id = self.snapshot_id;
+        artifact.width = self.width;
+        artifact.height = self.height;
+        artifact.expires_at = self.expires_at;
+        artifact.pinned = self.pinned.unwrap_or(false);
+        artifact.metadata_json = self
+            .metadata
+            .map(|value| serde_json::to_string(&value).unwrap_or_else(|_| "{}".to_string()));
+        artifact
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UploadArtifactRequest {
+    pub message_id: String,
+    pub snapshot_id: Option<String>,
+    pub kind: String,
+    pub media_type: String,
+    pub data_base64: String,
+    pub width: Option<i64>,
+    pub height: Option<i64>,
+    pub expires_at: Option<chrono::DateTime<Utc>>,
+    pub pinned: Option<bool>,
+    pub metadata: Option<Value>,
 }
 
 #[derive(Debug, Serialize)]
@@ -145,6 +273,8 @@ pub struct DiagnosticsMessages {
     last_reply_at: Option<String>,
 }
 
+const MAX_ARTIFACT_UPLOAD_BYTES: usize = 10 * 1024 * 1024;
+
 fn make_error_response(
     status: axum::http::StatusCode,
     error: &str,
@@ -160,6 +290,41 @@ fn make_error_response(
         .header("Content-Type", "application/json")
         .body(body.into())
         .unwrap()
+}
+
+fn artifact_root(state: &AppState) -> PathBuf {
+    let db_path = PathBuf::from(&state.db_path);
+    let base = if state.db_path.trim().is_empty() {
+        std::env::temp_dir().join("signal")
+    } else if db_path.is_dir() {
+        db_path
+    } else {
+        db_path
+            .parent()
+            .map(|path| path.to_path_buf())
+            .unwrap_or_else(|| PathBuf::from("."))
+    };
+    base.join("artifacts")
+}
+
+fn artifact_file_path(state: &AppState, sha256: &str) -> Option<PathBuf> {
+    if sha256.len() != 64 || !sha256.chars().all(|ch| ch.is_ascii_hexdigit()) {
+        return None;
+    }
+    Some(artifact_root(state).join(&sha256[0..2]).join(sha256))
+}
+
+fn decode_artifact_base64(input: &str) -> Result<Vec<u8>, String> {
+    let payload = input
+        .split_once(',')
+        .map(|(_, value)| value)
+        .unwrap_or(input)
+        .trim();
+
+    base64::engine::general_purpose::STANDARD
+        .decode(payload)
+        .or_else(|_| base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(payload))
+        .map_err(|error| format!("invalid base64 payload: {error}"))
 }
 
 fn token_from_headers(headers: &HeaderMap) -> Option<String> {
@@ -717,8 +882,18 @@ pub fn create_api_router(
         .route("/health", get(health))
         .route("/api/ask", post(create_ask))
         .route("/api/ask/{id}/wait", get(wait_for_ask))
+        .route("/api/events", get(list_event_log).post(create_event_log))
         .route("/api/messages", get(list_messages).post(create_message))
         .route("/api/messages/{id}", get(get_message))
+        .route(
+            "/api/messages/{id}/context",
+            get(list_context_snapshots).post(create_context_snapshot),
+        )
+        .route("/api/messages/{id}/artifacts", get(list_message_artifacts))
+        .route("/api/artifacts", post(create_artifact_metadata))
+        .route("/api/artifacts/upload", post(upload_artifact))
+        .route("/api/artifacts/{id}", get(get_artifact_metadata))
+        .route("/api/artifacts/{id}/content", get(get_artifact_content))
         .route(
             "/api/messages/{id}/replies",
             get(get_replies).post(create_reply),
@@ -736,6 +911,44 @@ pub fn create_api_router(
 
 async fn health() -> Json<HealthResponse> {
     Json(HealthResponse { ok: true })
+}
+
+async fn create_event_log(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    axum::extract::Json(payload): axum::extract::Json<CreateEventLogRequest>,
+) -> Result<Json<EventLogEntry>, axum::response::Response> {
+    check_auth(&state, &headers)?;
+
+    let entry = payload.into_entry();
+    let stored = state.storage.append_event_log(&entry).map_err(|e| {
+        make_error_response(
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            "event_append_failed",
+            &format!("Failed to append event: {}", e),
+        )
+    })?;
+    Ok(Json(stored))
+}
+
+async fn list_event_log(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<ListEventsQuery>,
+) -> Result<Json<Vec<EventLogEntry>>, axum::response::Response> {
+    check_read_auth(&state, &headers)?;
+
+    let events = state
+        .storage
+        .list_event_log(query.after_seq, query.limit)
+        .map_err(|e| {
+            make_error_response(
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                "event_list_failed",
+                &format!("Failed to list events: {}", e),
+            )
+        })?;
+    Ok(Json(events))
 }
 
 async fn create_message(
@@ -782,6 +995,15 @@ async fn create_message(
             &format!("Failed to create event: {}", e),
         )
     })?;
+    storage
+        .append_event_log(&EventLogEntry::message_created(&message))
+        .map_err(|e| {
+            make_error_response(
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                "event_append_failed",
+                &format!("Failed to append event log entry: {}", e),
+            )
+        })?;
 
     info!("Created message: {} from {}", message.id, message.source);
     send_message_push_notification(&state, &message).await;
@@ -843,6 +1065,17 @@ async fn create_ask(
     })?;
     storage.create_event(&event).ok();
     storage.create_event(&ask_event).ok();
+    let mut event_log = EventLogEntry::message_created(&message);
+    event_log.event_type = "signal.ask.created".to_string();
+    event_log.idempotency_key = Some(format!("signal.ask.created:{}", message.id));
+    event_log.extensions_json = serde_json::json!({"legacy_event_type": "ask_created"}).to_string();
+    storage.append_event_log(&event_log).map_err(|e| {
+        make_error_response(
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            "event_append_failed",
+            &format!("Failed to append ask event: {}", e),
+        )
+    })?;
 
     send_ask_push_notification(&state, &message).await;
 
@@ -1109,6 +1342,345 @@ async fn get_message(
     Ok(Json(MessageWithReplies { message, replies }))
 }
 
+async fn create_context_snapshot(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(message_id): Path<String>,
+    axum::extract::Json(payload): axum::extract::Json<CreateContextSnapshotRequest>,
+) -> Result<Json<ContextSnapshot>, axum::response::Response> {
+    check_auth(&state, &headers)?;
+
+    let storage = state.storage.as_ref();
+    storage.get_message(&message_id).map_err(|e| {
+        make_error_response(
+            axum::http::StatusCode::NOT_FOUND,
+            "message_not_found",
+            &format!("Message not found: {}", e),
+        )
+    })?;
+
+    let snapshot = payload.into_snapshot(message_id);
+    storage.create_context_snapshot(&snapshot).map_err(|e| {
+        make_error_response(
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            "context_snapshot_failed",
+            &format!("Failed to create context snapshot: {}", e),
+        )
+    })?;
+
+    let mut event = EventLogEntry::new(
+        "signal.context.captured".to_string(),
+        "service:signal-daemon".to_string(),
+        snapshot.source.clone(),
+        serde_json::json!({
+            "snapshot_id": snapshot.id,
+            "message_id": snapshot.message_id,
+            "stage": snapshot.stage,
+            "branch": snapshot.branch,
+            "head_oid": snapshot.head_oid,
+            "dirty": snapshot.dirty,
+            "staged_count": snapshot.staged_count,
+            "unstaged_count": snapshot.unstaged_count,
+            "untracked_count": snapshot.untracked_count
+        })
+        .to_string(),
+    );
+    event.subject = Some(format!(
+        "message:{}/snapshot:{}",
+        snapshot.message_id, snapshot.id
+    ));
+    event.correlation_id = Some(snapshot.message_id.clone());
+    event.resource = Some(format!("context_snapshot:{}", snapshot.id));
+    storage.append_event_log(&event).ok();
+
+    Ok(Json(snapshot))
+}
+
+async fn list_context_snapshots(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(message_id): Path<String>,
+) -> Result<Json<Vec<ContextSnapshot>>, axum::response::Response> {
+    check_read_auth(&state, &headers)?;
+
+    let snapshots = state
+        .storage
+        .list_context_snapshots(&message_id)
+        .map_err(|e| {
+            make_error_response(
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                "context_list_failed",
+                &format!("Failed to list context snapshots: {}", e),
+            )
+        })?;
+    Ok(Json(snapshots))
+}
+
+async fn create_artifact_metadata(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    axum::extract::Json(payload): axum::extract::Json<CreateArtifactMetadataRequest>,
+) -> Result<Json<ArtifactMetadata>, axum::response::Response> {
+    check_auth(&state, &headers)?;
+
+    let storage = state.storage.as_ref();
+    storage.get_message(&payload.message_id).map_err(|e| {
+        make_error_response(
+            axum::http::StatusCode::NOT_FOUND,
+            "message_not_found",
+            &format!("Message not found: {}", e),
+        )
+    })?;
+
+    if let Some(snapshot_id) = payload.snapshot_id.as_deref() {
+        storage.get_context_snapshot(snapshot_id).map_err(|e| {
+            make_error_response(
+                axum::http::StatusCode::NOT_FOUND,
+                "snapshot_not_found",
+                &format!("Context snapshot not found: {}", e),
+            )
+        })?;
+    }
+
+    let artifact = payload.into_artifact();
+    storage.create_artifact_metadata(&artifact).map_err(|e| {
+        make_error_response(
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            "artifact_create_failed",
+            &format!("Failed to create artifact metadata: {}", e),
+        )
+    })?;
+
+    let mut event = EventLogEntry::new(
+        "signal.artifact.created".to_string(),
+        "service:signal-daemon".to_string(),
+        "service:signal-daemon".to_string(),
+        serde_json::json!({
+            "artifact_id": artifact.id,
+            "message_id": artifact.message_id,
+            "snapshot_id": artifact.snapshot_id,
+            "kind": artifact.kind,
+            "media_type": artifact.media_type,
+            "sha256": artifact.sha256,
+            "size_bytes": artifact.size_bytes
+        })
+        .to_string(),
+    );
+    event.subject = Some(format!(
+        "message:{}/artifact:{}",
+        artifact.message_id, artifact.id
+    ));
+    event.correlation_id = Some(artifact.message_id.clone());
+    event.resource = Some(format!("artifact:{}", artifact.id));
+    storage.append_event_log(&event).ok();
+
+    Ok(Json(artifact))
+}
+
+async fn upload_artifact(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    axum::extract::Json(payload): axum::extract::Json<UploadArtifactRequest>,
+) -> Result<Json<ArtifactMetadata>, axum::response::Response> {
+    check_auth(&state, &headers)?;
+
+    let storage = state.storage.as_ref();
+    storage.get_message(&payload.message_id).map_err(|e| {
+        make_error_response(
+            axum::http::StatusCode::NOT_FOUND,
+            "message_not_found",
+            &format!("Message not found: {}", e),
+        )
+    })?;
+
+    if let Some(snapshot_id) = payload.snapshot_id.as_deref() {
+        storage.get_context_snapshot(snapshot_id).map_err(|e| {
+            make_error_response(
+                axum::http::StatusCode::NOT_FOUND,
+                "snapshot_not_found",
+                &format!("Context snapshot not found: {}", e),
+            )
+        })?;
+    }
+
+    let bytes = decode_artifact_base64(&payload.data_base64).map_err(|e| {
+        make_error_response(
+            axum::http::StatusCode::BAD_REQUEST,
+            "invalid_artifact_payload",
+            &e,
+        )
+    })?;
+    if bytes.len() > MAX_ARTIFACT_UPLOAD_BYTES {
+        return Err(make_error_response(
+            axum::http::StatusCode::PAYLOAD_TOO_LARGE,
+            "artifact_too_large",
+            "Artifact exceeds the 10 MiB upload limit",
+        ));
+    }
+
+    let mut hasher = Sha256::new();
+    hasher.update(&bytes);
+    let sha256 = format!("{:x}", hasher.finalize());
+    let Some(path) = artifact_file_path(&state, &sha256) else {
+        return Err(make_error_response(
+            axum::http::StatusCode::BAD_REQUEST,
+            "invalid_artifact_hash",
+            "Computed artifact hash was invalid",
+        ));
+    };
+
+    if let Some(parent) = path.parent() {
+        tokio::fs::create_dir_all(parent).await.map_err(|e| {
+            make_error_response(
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                "artifact_store_failed",
+                &format!("Failed to create artifact directory: {}", e),
+            )
+        })?;
+    }
+    if tokio::fs::metadata(&path).await.is_err() {
+        tokio::fs::write(&path, &bytes).await.map_err(|e| {
+            make_error_response(
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                "artifact_store_failed",
+                &format!("Failed to write artifact: {}", e),
+            )
+        })?;
+    }
+
+    let mut artifact = ArtifactMetadata::new(
+        payload.message_id,
+        payload.kind,
+        payload.media_type,
+        sha256.clone(),
+        bytes.len() as i64,
+        format!("artifact://sha256/{}", sha256),
+    );
+    artifact.snapshot_id = payload.snapshot_id;
+    artifact.width = payload.width;
+    artifact.height = payload.height;
+    artifact.expires_at = payload.expires_at;
+    artifact.pinned = payload.pinned.unwrap_or(false);
+    artifact.metadata_json = payload
+        .metadata
+        .map(|value| serde_json::to_string(&value).unwrap_or_else(|_| "{}".to_string()));
+
+    storage.create_artifact_metadata(&artifact).map_err(|e| {
+        make_error_response(
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            "artifact_create_failed",
+            &format!("Failed to create artifact metadata: {}", e),
+        )
+    })?;
+
+    let mut event = EventLogEntry::new(
+        "signal.artifact.uploaded".to_string(),
+        "service:signal-daemon".to_string(),
+        "service:signal-daemon".to_string(),
+        serde_json::json!({
+            "artifact_id": artifact.id,
+            "message_id": artifact.message_id,
+            "snapshot_id": artifact.snapshot_id,
+            "kind": artifact.kind,
+            "media_type": artifact.media_type,
+            "sha256": artifact.sha256,
+            "size_bytes": artifact.size_bytes
+        })
+        .to_string(),
+    );
+    event.subject = Some(format!(
+        "message:{}/artifact:{}",
+        artifact.message_id, artifact.id
+    ));
+    event.correlation_id = Some(artifact.message_id.clone());
+    event.resource = Some(format!("artifact:{}", artifact.id));
+    storage.append_event_log(&event).ok();
+
+    Ok(Json(artifact))
+}
+
+async fn list_message_artifacts(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(message_id): Path<String>,
+) -> Result<Json<Vec<ArtifactMetadata>>, axum::response::Response> {
+    check_read_auth(&state, &headers)?;
+
+    let artifacts = state
+        .storage
+        .list_artifacts_for_message(&message_id)
+        .map_err(|e| {
+            make_error_response(
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                "artifact_list_failed",
+                &format!("Failed to list artifacts: {}", e),
+            )
+        })?;
+    Ok(Json(artifacts))
+}
+
+async fn get_artifact_metadata(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<Json<ArtifactMetadata>, axum::response::Response> {
+    check_read_auth(&state, &headers)?;
+
+    let artifact = state.storage.get_artifact_metadata(&id).map_err(|e| {
+        make_error_response(
+            axum::http::StatusCode::NOT_FOUND,
+            "artifact_not_found",
+            &format!("Artifact metadata not found: {}", e),
+        )
+    })?;
+    Ok(Json(artifact))
+}
+
+async fn get_artifact_content(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Query(query): Query<TokenQuery>,
+) -> Result<impl IntoResponse, axum::response::Response> {
+    let query_token = query.device_token.as_deref().or(query.token.as_deref());
+    if let Some(token) = query_token {
+        state
+            .authenticate_token(token)
+            .map_err(auth_error_response)?;
+    } else {
+        check_read_auth(&state, &headers)?;
+    }
+
+    let artifact = state.storage.get_artifact_metadata(&id).map_err(|e| {
+        make_error_response(
+            axum::http::StatusCode::NOT_FOUND,
+            "artifact_not_found",
+            &format!("Artifact metadata not found: {}", e),
+        )
+    })?;
+    let Some(path) = artifact_file_path(&state, &artifact.sha256) else {
+        return Err(make_error_response(
+            axum::http::StatusCode::BAD_REQUEST,
+            "invalid_artifact_hash",
+            "Artifact metadata contains an invalid hash",
+        ));
+    };
+    let bytes = tokio::fs::read(path).await.map_err(|e| {
+        make_error_response(
+            axum::http::StatusCode::NOT_FOUND,
+            "artifact_content_not_found",
+            &format!("Artifact content not found: {}", e),
+        )
+    })?;
+
+    let response = Response::builder()
+        .header("Content-Type", artifact.media_type)
+        .header("Cache-Control", "private, max-age=60")
+        .body(Body::from(bytes))
+        .unwrap();
+    Ok(response)
+}
+
 async fn get_replies(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -1138,7 +1710,7 @@ async fn create_reply(
 
     let storage = state.storage.as_ref();
 
-    let _ = storage.get_message(&message_id).map_err(|e| {
+    let message = storage.get_message(&message_id).map_err(|e| {
         let status = if e.to_string().contains("Not found") {
             axum::http::StatusCode::NOT_FOUND
         } else {
@@ -1174,6 +1746,15 @@ async fn create_reply(
             &format!("Failed to create event: {}", e),
         )
     })?;
+    storage
+        .append_event_log(&EventLogEntry::reply_created(&reply, &message))
+        .map_err(|e| {
+            make_error_response(
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                "event_append_failed",
+                &format!("Failed to append reply event: {}", e),
+            )
+        })?;
 
     info!("Created reply: {} for message: {}", reply.id, message_id);
     Ok(Json(reply))
@@ -1218,7 +1799,7 @@ async fn consume_reply(
         make_error_response(status, "not_found", &format!("Reply not found: {}", e))
     })?;
 
-    let _message = storage.get_message(&reply.message_id).map_err(|e| {
+    let message = storage.get_message(&reply.message_id).map_err(|e| {
         make_error_response(
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
             "internal_error",
@@ -1251,6 +1832,19 @@ async fn consume_reply(
             &format!("Failed to get updated reply: {}", e),
         )
     })?;
+    storage
+        .append_event_log(&EventLogEntry::reply_consumed(
+            &updated_reply,
+            &message,
+            "cli",
+        ))
+        .map_err(|e| {
+            make_error_response(
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                "event_append_failed",
+                &format!("Failed to append consume event: {}", e),
+            )
+        })?;
 
     Ok(Json(updated_reply))
 }
@@ -2235,7 +2829,7 @@ fn check_html_read_auth(
                 ),
             }),
         _ => {
-            let body = r#"<!DOCTYPE html><html><head><title>401 Unauthorized</title></head><body style="font-family:system-ui;padding:40px;text-align:center;"><h1>401 Unauthorized</h1><p>Token required. Add ?token=dev-token to URL.</p><p><a href="/app?token=dev-token">Open Signal app with dev token</a></p></body></html>"#;
+            let body = r#"<!DOCTYPE html><html><head><title>401 Unauthorized</title></head><body style="font-family:system-ui;padding:40px;text-align:center;"><h1>401 Unauthorized</h1><p>Token required. Pair this device from the dashboard, then open the app again.</p><p><a href="/app">Open Signal app</a></p></body></html>"#;
             Err(axum::response::Response::builder()
                 .status(401)
                 .header("Content-Type", "text/html")
@@ -2307,7 +2901,7 @@ async fn reply_form_handler(
 
     let storage = state.storage.as_ref();
 
-    let _ = storage.get_message(&message_id).map_err(|_| {
+    let message = storage.get_message(&message_id).map_err(|_| {
         axum::response::Response::builder()
             .status(404)
             .body("Message not found".into())
@@ -2334,6 +2928,9 @@ async fn reply_form_handler(
         .ok();
 
     storage.create_event(&event).ok();
+    storage
+        .append_event_log(&EventLogEntry::reply_created(&reply, &message))
+        .ok();
 
     info!(
         "Created reply via form: {} for message: {}",
@@ -2380,15 +2977,18 @@ async fn pwa_manifest() -> impl IntoResponse {
                 "name": "Signal",
                 "short_name": "Signal",
                 "description": "Local-first human-agent handoff inbox",
-                "start_url": "/app?token=dev-token",
+                "id": "/app",
+                "start_url": "/app",
                 "scope": "/",
                 "display": "standalone",
-                "background_color": "#f5f5f7",
-                "theme_color": "#f5f5f7",
+                "display_override": ["standalone", "minimal-ui"],
+                "background_color": "#f7f7f4",
+                "theme_color": "#f7f7f4",
                 "icons": [
-                    {"src": "/icon-192.png", "sizes": "192x192", "type": "image/png"},
-                    {"src": "/icon-512.png", "sizes": "512x512", "type": "image/png"}
-                ]
+                    {"src": "/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any maskable"},
+                    {"src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable"}
+                ],
+                "prefer_related_applications": false
             })
             .to_string(),
         )
@@ -2492,7 +3092,7 @@ mod tests {
             Some(VapidConfig {
                 private_key: "private".to_string(),
                 public_key: "invalid".to_string(),
-                subject: "mailto:test@example.local".to_string(),
+                subject: "mailto:araheemimami@gmail.com".to_string(),
                 public_base_url: Some("https://example.test".to_string()),
             }),
             ".\\test.db".to_string(),
