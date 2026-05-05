@@ -27,12 +27,19 @@ self.addEventListener('notificationclick', function(event) {
   event.notification.close();
   const rawUrl = event.notification.data.url || '/';
   const targetUrl = new URL(rawUrl, self.location.origin).href;
+  const appPrefix = self.location.origin + '/app';
 
   event.waitUntil(
     clients.matchAll({ type: 'window', includeUncontrolled: true }).then(function(clientList) {
       for (const client of clientList) {
         if ('focus' in client && client.url === targetUrl) {
           return client.focus();
+        }
+        if ('focus' in client && client.url.startsWith(appPrefix)) {
+          return client.focus().then(function(focused) {
+            focused.postMessage({ type: 'open-url', url: targetUrl });
+            return focused;
+          });
         }
       }
       return clients.openWindow(targetUrl);

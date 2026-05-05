@@ -1,5 +1,10 @@
 [workspace]
-members = ["crates/signal-core", "crates/signal-daemon", "crates/signal-cli"]
+members = [
+    "crates/signal-core",
+    "crates/signal-daemon",
+    "crates/signal-cli",
+    "crates/signal-worker",
+]
 resolver = "2"
 
 [workspace.package]
