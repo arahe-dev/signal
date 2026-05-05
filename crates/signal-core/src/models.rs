@@ -7,6 +7,7 @@ use uuid::Uuid;
 #[serde(rename_all = "lowercase")]
 pub enum MessageStatus {
     New,
+    #[serde(rename = "pending_reply", alias = "pendingreply", alias = "pending")]
     PendingReply,
     Replied,
     Timeout,
@@ -55,6 +56,7 @@ impl std::str::FromStr for MessageStatus {
 #[serde(rename_all = "lowercase")]
 pub enum PermissionLevel {
     Private,
+    #[serde(rename = "ai_readable", alias = "aireadable")]
     AiReadable,
     Actionable,
 }
@@ -830,5 +832,28 @@ impl PairingCode {
 
     pub fn is_valid(&self) -> bool {
         !self.is_expired() && !self.is_used()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{MessageStatus, PermissionLevel};
+
+    #[test]
+    fn serde_accepts_display_names_for_multi_word_enums() {
+        let permission: PermissionLevel = serde_json::from_str("\"ai_readable\"").unwrap();
+        assert_eq!(permission, PermissionLevel::AiReadable);
+
+        let status: MessageStatus = serde_json::from_str("\"pending_reply\"").unwrap();
+        assert_eq!(status, MessageStatus::PendingReply);
+    }
+
+    #[test]
+    fn serde_keeps_back_compat_for_old_lowercase_enum_names() {
+        let permission: PermissionLevel = serde_json::from_str("\"aireadable\"").unwrap();
+        assert_eq!(permission, PermissionLevel::AiReadable);
+
+        let status: MessageStatus = serde_json::from_str("\"pendingreply\"").unwrap();
+        assert_eq!(status, MessageStatus::PendingReply);
     }
 }
