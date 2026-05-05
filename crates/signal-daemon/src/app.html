@@ -3,11 +3,11 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta name="theme-color" content="#f5f5f7">
+    <meta id="theme-color" name="theme-color" content="#f7f7f4">
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-title" content="Signal">
     <meta name="apple-mobile-web-app-status-bar-style" content="default">
-    <title>Signal - PWA</title>
+    <title>Signal</title>
     <link rel="apple-touch-icon" href="/apple-touch-icon.png?v=2">
     <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png?v=2">
     <link rel="apple-touch-icon-precomposed" href="/apple-touch-icon-precomposed.png?v=2">
@@ -15,199 +15,479 @@
     <link rel="icon" type="image/png" sizes="512x512" href="/icon-512.png">
     <link rel="manifest" href="/manifest.webmanifest">
     <style>
+        :root {
+            --bg: #f7f7f4;
+            --surface: #ffffff;
+            --surface-alt: #ededE7;
+            --text: #202124;
+            --muted: #676b73;
+            --line: #d9d9d2;
+            --accent: #1b66d2;
+            --accent-strong: #124da3;
+            --green: #1d7a45;
+            --red: #b3261e;
+            --amber: #9a5b00;
+            --shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
+        }
+
+        @media (prefers-color-scheme: dark) {
+            :root {
+                --bg: #161718;
+                --surface: #202225;
+                --surface-alt: #2b2d31;
+                --text: #f1f3f4;
+                --muted: #a9adb5;
+                --line: #3d4047;
+                --accent: #77a7ff;
+                --accent-strong: #9bbfff;
+                --green: #6cc58f;
+                --red: #ff8a80;
+                --amber: #f0b35b;
+                --shadow: none;
+            }
+        }
+
+        html[data-theme="light"] {
+            --bg: #f7f7f4;
+            --surface: #ffffff;
+            --surface-alt: #ededE7;
+            --text: #202124;
+            --muted: #676b73;
+            --line: #d9d9d2;
+            --accent: #1b66d2;
+            --accent-strong: #124da3;
+            --green: #1d7a45;
+            --red: #b3261e;
+            --amber: #9a5b00;
+            --shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
+        }
+
+        html[data-theme="dark"] {
+            --bg: #161718;
+            --surface: #202225;
+            --surface-alt: #2b2d31;
+            --text: #f1f3f4;
+            --muted: #a9adb5;
+            --line: #3d4047;
+            --accent: #77a7ff;
+            --accent-strong: #9bbfff;
+            --green: #6cc58f;
+            --red: #ff8a80;
+            --amber: #f0b35b;
+            --shadow: none;
+        }
+
         * {
             box-sizing: border-box;
-            margin: 0;
-            padding: 0;
         }
+
         body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-            background: #f5f5f7;
-            color: #1d1d1f;
-            line-height: 1.5;
-            padding: 20px;
+            margin: 0;
+            min-height: 100vh;
+            background: var(--bg);
+            color: var(--text);
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            line-height: 1.45;
         }
-        .container {
-            max-width: 600px;
+
+        .shell {
+            width: min(980px, 100%);
             margin: 0 auto;
+            padding: 16px;
         }
+
+        header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+            margin-bottom: 14px;
+        }
+
         h1 {
-            font-size: 28px;
-            font-weight: 600;
-            margin-bottom: 16px;
+            font-size: 24px;
+            line-height: 1.1;
+            margin: 0;
+            letter-spacing: 0;
         }
-        .card {
-            background: white;
-            border-radius: 12px;
-            padding: 20px;
-            margin-bottom: 16px;
-            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+
+        h2 {
+            font-size: 17px;
+            margin: 0;
+            letter-spacing: 0;
         }
-        .btn {
-            display: inline-block;
-            padding: 14px 24px;
-            background: #007aff;
-            color: white;
-            border: none;
-            border-radius: 10px;
-            font-size: 16px;
-            font-weight: 500;
+
+        h3 {
+            font-size: 14px;
+            margin: 0 0 8px;
+            letter-spacing: 0;
+        }
+
+        button, input, textarea {
+            font: inherit;
+        }
+
+        button {
+            min-height: 38px;
+            border: 1px solid var(--line);
+            border-radius: 8px;
+            background: var(--surface);
+            color: var(--text);
+            padding: 8px 12px;
             cursor: pointer;
-            margin-top: 12px;
         }
-        .btn:disabled {
-            background: #a1a1a6;
+
+        button.primary {
+            background: var(--accent);
+            border-color: var(--accent);
+            color: #fff;
+        }
+
+        button.primary:hover {
+            background: var(--accent-strong);
+        }
+
+        button:disabled {
+            opacity: 0.55;
             cursor: not-allowed;
         }
-        .btn-secondary {
-            background: #f5f5f7;
-            color: #007aff;
-            border: 1px solid #007aff;
-        }
-        .status {
-            padding: 12px;
+
+        input, textarea {
+            width: 100%;
+            min-height: 40px;
+            border: 1px solid var(--line);
             border-radius: 8px;
-            margin-top: 12px;
-            font-size: 14px;
+            background: var(--surface);
+            color: var(--text);
+            padding: 9px 10px;
         }
-        .status-success {
-            background: #e8f5e9;
-            color: #388e3c;
+
+        textarea {
+            min-height: 84px;
+            resize: vertical;
         }
-        .status-error {
-            background: #ffebee;
-            color: #d32f2f;
-        }
-        .status-info {
-            background: #e3f2fd;
-            color: #1976d2;
-        }
-        .note {
-            font-size: 13px;
-            color: #86868b;
-            margin-top: 16px;
-        }
+
         .toolbar {
+            display: flex;
+            flex-wrap: wrap;
+            justify-content: flex-end;
+            gap: 8px;
+        }
+
+        .tabs {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 6px;
+            margin-bottom: 12px;
+            background: var(--surface-alt);
+            border: 1px solid var(--line);
+            border-radius: 8px;
+            padding: 4px;
+        }
+
+        .tab {
+            border: 0;
+            background: transparent;
+            color: var(--muted);
+        }
+
+        .tab.active {
+            background: var(--surface);
+            color: var(--text);
+            box-shadow: var(--shadow);
+        }
+
+        .grid {
+            display: grid;
+            grid-template-columns: minmax(0, 1fr);
+            gap: 12px;
+        }
+
+        @media (min-width: 820px) {
+            .grid.detail-open {
+                grid-template-columns: minmax(280px, 0.85fr) minmax(0, 1.15fr);
+            }
+        }
+
+        .panel {
+            background: var(--surface);
+            border: 1px solid var(--line);
+            border-radius: 8px;
+            box-shadow: var(--shadow);
+            overflow: hidden;
+        }
+
+        .panel-head {
             display: flex;
             justify-content: space-between;
             align-items: center;
-            gap: 12px;
-            margin-bottom: 12px;
+            gap: 8px;
+            padding: 12px;
+            border-bottom: 1px solid var(--line);
         }
-        .message-list {
+
+        .panel-body {
+            padding: 12px;
+        }
+
+        .list {
             display: grid;
-            gap: 10px;
+            gap: 8px;
         }
-        .message-link {
-            display: block;
-            padding: 14px;
-            border: 1px solid #e5e5ea;
-            border-radius: 10px;
+
+        .row {
+            display: grid;
+            gap: 5px;
+            border: 1px solid var(--line);
+            border-radius: 8px;
+            padding: 10px;
             color: inherit;
             text-decoration: none;
+            background: var(--surface);
         }
-        .message-row {
+
+        .row:hover {
+            border-color: var(--accent);
+        }
+
+        .row-title {
             display: flex;
             justify-content: space-between;
-            gap: 10px;
-            margin-bottom: 6px;
-        }
-        .message-title {
+            gap: 8px;
             font-weight: 650;
         }
-        .message-preview, .message-meta {
-            color: #6e6e73;
+
+        .preview {
+            color: var(--muted);
+            font-size: 13px;
+            overflow-wrap: anywhere;
+        }
+
+        .meta {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+            color: var(--muted);
+            font-size: 12px;
+        }
+
+        .badge {
+            border-radius: 8px;
+            padding: 2px 7px;
+            font-size: 12px;
+            white-space: nowrap;
+            background: var(--surface-alt);
+            color: var(--muted);
+        }
+
+        .badge.pending_reply {
+            color: var(--amber);
+        }
+
+        .badge.replied, .badge.consumed {
+            color: var(--green);
+        }
+
+        .badge.failed, .badge.timeout {
+            color: var(--red);
+        }
+
+        .status {
+            border-radius: 8px;
+            padding: 9px 10px;
+            background: var(--surface-alt);
+            color: var(--muted);
             font-size: 13px;
         }
-        .badge {
-            border-radius: 999px;
-            padding: 2px 8px;
-            font-size: 12px;
-            background: #f2f2f7;
-            white-space: nowrap;
+
+        .status.error {
+            color: var(--red);
+        }
+
+        .status.ok {
+            color: var(--green);
+        }
+
+        .hidden {
+            display: none !important;
+        }
+
+        .detail-body {
+            white-space: pre-wrap;
+            overflow-wrap: anywhere;
+            margin: 0 0 12px;
+        }
+
+        .section {
+            border-top: 1px solid var(--line);
+            padding-top: 12px;
+            margin-top: 12px;
+        }
+
+        .artifact-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+            gap: 8px;
+        }
+
+        .artifact img {
+            display: block;
+            width: 100%;
+            max-height: 220px;
+            object-fit: contain;
+            border: 1px solid var(--line);
+            border-radius: 8px;
+            background: var(--surface-alt);
+        }
+
+        .form-grid {
+            display: grid;
+            gap: 8px;
+        }
+
+        @media (min-width: 640px) {
+            .form-grid.two {
+                grid-template-columns: 1fr 1fr;
+            }
         }
     </style>
 </head>
 <body>
-    <div class="container">
-        <h1>Signal PWA</h1>
-
-        <div class="card">
+    <main class="shell">
+        <header>
+            <h1>Signal</h1>
             <div class="toolbar">
-                <h2>Inbox</h2>
-                <button id="refresh-inbox" class="btn btn-secondary" style="margin-top:0;">Refresh</button>
+                <button id="theme-toggle" title="Toggle color mode">Mode</button>
+                <button id="refresh" title="Refresh current view">Refresh</button>
             </div>
-            <div id="push-status" class="note">Push: checking...</div>
-            <div id="message-list" class="message-list"></div>
-        </div>
+        </header>
 
-        <div class="card" id="notification-card">
-            <h2>Notifications</h2>
-            <p>Enable push notifications to receive alerts when new messages arrive.</p>
-            <button id="enable-notifications" class="btn">Enable Notifications</button>
-            <div id="notification-status"></div>
-        </div>
+        <nav class="tabs" aria-label="Views">
+            <button class="tab active" data-tab="inbox">Inbox</button>
+            <button class="tab" data-tab="events">Events</button>
+            <button class="tab" data-tab="device">Device</button>
+        </nav>
 
-        <div class="card">
-            <h2>Instructions</h2>
-            <ol style="margin-left: 20px; margin-top: 8px;">
-                <li>Tap "Enable Notifications" above</li>
-                <li>Grant notification permission when prompted</li>
-                <li>Add to Home Screen (iOS: Share &gt; Add to Home Screen)</li>
-                <li>Send a message using signal-cli</li>
-                <li>Receive push notification on this device</li>
-            </ol>
-        </div>
+        <section id="inbox-view">
+            <div id="inbox-grid" class="grid">
+                <div class="panel">
+                    <div class="panel-head">
+                        <h2>Inbox</h2>
+                        <span id="push-line" class="preview">Push: checking</span>
+                    </div>
+                    <div class="panel-body">
+                        <div id="message-list" class="list"></div>
+                    </div>
+                </div>
 
-        <p class="note">
-            <strong>Note:</strong> Your device must be online to receive notifications.
-            Messages are stored locally on your laptop - this PWA connects over Tailscale.
-        </p>
-    </div>
+                <div id="detail-panel" class="panel hidden">
+                    <div class="panel-head">
+                        <h2 id="detail-title">Message</h2>
+                        <button id="close-detail">Close</button>
+                    </div>
+                    <div id="detail-body" class="panel-body"></div>
+                </div>
+            </div>
+        </section>
+
+        <section id="events-view" class="hidden">
+            <div class="panel">
+                <div class="panel-head">
+                    <h2>Event Log</h2>
+                    <button id="load-events">Load</button>
+                </div>
+                <div class="panel-body">
+                    <div id="event-list" class="list"></div>
+                </div>
+            </div>
+        </section>
+
+        <section id="device-view" class="hidden">
+            <div class="grid">
+                <div class="panel">
+                    <div class="panel-head">
+                        <h2>Notifications</h2>
+                        <span id="token-line" class="preview">Token: checking</span>
+                    </div>
+                    <div class="panel-body">
+                        <div class="form-grid">
+                            <button id="enable-notifications" class="primary">Enable Notifications</button>
+                            <button id="clear-pairing">Clear Local Pairing</button>
+                            <div id="notification-status" class="status"></div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="panel">
+                    <div class="panel-head">
+                        <h2>Wake Ping</h2>
+                    </div>
+                    <div class="panel-body">
+                        <div class="form-grid">
+                            <div class="form-grid two">
+                                <input id="wake-agent" placeholder="Agent id" value="codex">
+                                <input id="wake-project" placeholder="Project" value="signal">
+                            </div>
+                            <textarea id="wake-body">hello</textarea>
+                            <button id="send-wake" class="primary">Send Ping</button>
+                            <div id="wake-status" class="status"></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </section>
+    </main>
 
     <script>
-        const enableBtn = document.getElementById('enable-notifications');
-        const statusDiv = document.getElementById('notification-status');
         const messageList = document.getElementById('message-list');
-        const pushStatus = document.getElementById('push-status');
-        document.getElementById('refresh-inbox').addEventListener('click', loadInbox);
+        const detailPanel = document.getElementById('detail-panel');
+        const detailBody = document.getElementById('detail-body');
+        const detailTitle = document.getElementById('detail-title');
+        const inboxGrid = document.getElementById('inbox-grid');
+        const pushLine = document.getElementById('push-line');
+        const tokenLine = document.getElementById('token-line');
+        const notificationStatus = document.getElementById('notification-status');
+        const eventList = document.getElementById('event-list');
+        const wakeStatus = document.getElementById('wake-status');
+        const themeColor = document.getElementById('theme-color');
+
+        let token = getSignalToken();
+        let currentTab = 'inbox';
+        let currentMessageId = new URLSearchParams(location.search).get('message');
 
         function getSignalToken() {
             const params = new URLSearchParams(location.search);
             const urlDeviceToken = params.get('device_token');
             const urlToken = params.get('token');
             const stored = localStorage.getItem('signal_device_token') || localStorage.getItem('signal_token');
-            const token = urlDeviceToken || urlToken || stored || '';
+            const nextToken = urlDeviceToken || urlToken || stored || '';
 
             if (urlDeviceToken) localStorage.setItem('signal_device_token', urlDeviceToken);
             if (urlToken && !stored) localStorage.setItem('signal_token', urlToken);
 
             if ((urlDeviceToken || urlToken) && history.replaceState) {
-                history.replaceState({}, document.title, location.pathname);
+                const clean = new URL(location.href);
+                clean.searchParams.delete('device_token');
+                clean.searchParams.delete('token');
+                history.replaceState({}, document.title, clean.pathname + clean.search);
             }
-            return token;
+            return nextToken;
         }
 
-        let token = getSignalToken();
-
         function authHeaders(extra) {
-            const headers = Object.assign({}, extra || {});
             token = getSignalToken();
+            const headers = Object.assign({}, extra || {});
             if (token) headers['X-Signal-Token'] = token;
             return headers;
         }
 
-        function showStatus(message, type) {
-            statusDiv.innerHTML = '<div class="status status-' + type + '">' + escapeHtml(message) + '</div>';
+        function authQuery() {
+            return token ? '?device_token=' + encodeURIComponent(token) : '';
         }
 
-        function showPairAgain(message) {
-            localStorage.removeItem('signal_device_token');
-            token = getSignalToken();
-            const text = message || 'Device revoked or not paired. Pair this device again from the dashboard.';
-            messageList.innerHTML = '<div class="status status-error">' + escapeHtml(text) + '</div>';
-            pushStatus.textContent = 'Push: pairing required';
-            showStatus(text, 'error');
+        function setStatus(node, message, kind) {
+            node.textContent = message;
+            node.className = 'status' + (kind ? ' ' + kind : '');
         }
 
         async function parseJsonResponse(response) {
@@ -220,56 +500,231 @@
             if (response.status === 401 || response.status === 403) {
                 const body = await parseJsonResponse(response);
                 if (body.error === 'device_revoked') {
-                    showPairAgain(body.message);
-                    throw new Error('device_revoked: ' + body.message);
+                    showPairingRequired(body.message);
+                    throw new Error('device_revoked');
+                }
+                if (response.status === 401) {
+                    showPairingRequired(body.message || 'Pair this device from the dashboard.');
                 }
             }
             return response;
         }
 
-        enableBtn.addEventListener('click', enableNotifications);
+        function showPairingRequired(message) {
+            localStorage.removeItem('signal_device_token');
+            token = getSignalToken();
+            messageList.innerHTML = '<div class="status error">' + escapeHtml(message || 'Pairing required') + '</div>';
+            pushLine.textContent = 'Push: pairing required';
+            tokenLine.textContent = 'Token: missing';
+        }
+
+        function applyTheme() {
+            const mode = localStorage.getItem('signal_theme') || 'system';
+            document.documentElement.dataset.theme = mode === 'system' ? '' : mode;
+            const dark = mode === 'dark' || (mode === 'system' && window.matchMedia('(prefers-color-scheme: dark)').matches);
+            themeColor.setAttribute('content', dark ? '#161718' : '#f7f7f4');
+        }
+
+        function toggleTheme() {
+            const current = localStorage.getItem('signal_theme') || 'system';
+            const next = current === 'system' ? 'dark' : current === 'dark' ? 'light' : 'system';
+            localStorage.setItem('signal_theme', next);
+            applyTheme();
+        }
+
+        function showTab(tab) {
+            currentTab = tab;
+            document.querySelectorAll('.tab').forEach((button) => {
+                button.classList.toggle('active', button.dataset.tab === tab);
+            });
+            document.getElementById('inbox-view').classList.toggle('hidden', tab !== 'inbox');
+            document.getElementById('events-view').classList.toggle('hidden', tab !== 'events');
+            document.getElementById('device-view').classList.toggle('hidden', tab !== 'device');
+            if (tab === 'events') loadEvents();
+            if (tab === 'device') refreshDeviceState();
+        }
+
+        async function loadInbox() {
+            token = getSignalToken();
+            refreshDeviceState();
+            if (!token) {
+                showPairingRequired('Pair this device or open the app with a valid token once.');
+                return;
+            }
+
+            try {
+                const [messagesResponse, pushResponse] = await Promise.all([
+                    guardedFetch('/api/messages?limit=50', { headers: authHeaders() }),
+                    guardedFetch('/api/push/status', { headers: authHeaders() })
+                ]);
+
+                if (pushResponse.ok) {
+                    const push = await pushResponse.json();
+                    pushLine.textContent = 'Push: ' + (push.web_push_enabled ? 'on' : 'off') + ', subscriptions ' + push.subscriptions_count;
+                } else {
+                    pushLine.textContent = 'Push: unavailable';
+                }
+
+                if (!messagesResponse.ok) {
+                    const body = await parseJsonResponse(messagesResponse);
+                    messageList.innerHTML = '<div class="status error">' + escapeHtml(body.message || 'Unable to load messages') + '</div>';
+                    return;
+                }
+
+                const messages = await messagesResponse.json();
+                const active = messages.filter((message) => message.status !== 'archived');
+                if (active.length === 0) {
+                    messageList.innerHTML = '<div class="status">No active messages.</div>';
+                    return;
+                }
+
+                messageList.innerHTML = active.map(renderMessageRow).join('');
+                messageList.querySelectorAll('[data-message-id]').forEach((row) => {
+                    row.addEventListener('click', (event) => {
+                        event.preventDefault();
+                        openMessage(row.dataset.messageId, true);
+                    });
+                });
+
+                if (currentMessageId) openMessage(currentMessageId, false);
+            } catch (error) {
+                if (String(error.message || error) !== 'device_revoked') {
+                    messageList.innerHTML = '<div class="status error">' + escapeHtml(error.message || error) + '</div>';
+                }
+            }
+        }
+
+        function renderMessageRow(message) {
+            const meta = [message.source, message.project, message.agent_id].filter(Boolean).join(' / ');
+            return '<a class="row" href="/app?message=' + encodeURIComponent(message.id) + '" data-message-id="' + escapeHtml(message.id) + '">' +
+                '<div class="row-title"><span>' + escapeHtml(message.title) + '</span><span class="badge ' + escapeHtml(message.status) + '">' + escapeHtml(message.status) + '</span></div>' +
+                '<div class="preview">' + escapeHtml(message.body || '') + '</div>' +
+                '<div class="meta"><span>' + escapeHtml(meta || 'signal') + '</span><span>' + escapeHtml(formatTime(message.created_at)) + '</span></div>' +
+                '</a>';
+        }
+
+        async function openMessage(messageId, updateHistory) {
+            currentMessageId = messageId;
+            if (updateHistory && history.pushState) {
+                history.pushState({}, document.title, '/app?message=' + encodeURIComponent(messageId));
+            }
+            detailPanel.classList.remove('hidden');
+            inboxGrid.classList.add('detail-open');
+            detailBody.innerHTML = '<div class="status">Loading message...</div>';
+
+            try {
+                const [messageResponse, contextResponse, artifactsResponse] = await Promise.all([
+                    guardedFetch('/api/messages/' + encodeURIComponent(messageId), { headers: authHeaders() }),
+                    guardedFetch('/api/messages/' + encodeURIComponent(messageId) + '/context', { headers: authHeaders() }),
+                    guardedFetch('/api/messages/' + encodeURIComponent(messageId) + '/artifacts', { headers: authHeaders() })
+                ]);
+                if (!messageResponse.ok) throw new Error('Message load failed: ' + messageResponse.status);
+                const payload = await messageResponse.json();
+                const snapshots = contextResponse.ok ? await contextResponse.json() : [];
+                const artifacts = artifactsResponse.ok ? await artifactsResponse.json() : [];
+                renderDetail(payload.message, payload.replies || [], snapshots, artifacts);
+            } catch (error) {
+                detailBody.innerHTML = '<div class="status error">' + escapeHtml(error.message || error) + '</div>';
+            }
+        }
+
+        function renderDetail(message, replies, snapshots, artifacts) {
+            detailTitle.textContent = message.title;
+            const replyItems = replies.length
+                ? replies.map((reply) => '<div class="row"><div>' + escapeHtml(reply.body) + '</div><div class="meta"><span>' + escapeHtml(reply.source) + '</span><span>' + escapeHtml(formatTime(reply.created_at)) + '</span></div></div>').join('')
+                : '<div class="status">No replies.</div>';
+            const contextItems = snapshots.length
+                ? snapshots.map((snapshot) => '<div class="row"><div class="row-title"><span>' + escapeHtml(snapshot.stage) + '</span><span class="badge">' + escapeHtml(snapshot.dirty ? 'dirty' : 'clean') + '</span></div><div class="preview">' + escapeHtml([snapshot.branch, snapshot.head_oid].filter(Boolean).join(' @ ')) + '</div><div class="meta"><span>staged ' + Number(snapshot.staged_count || 0) + '</span><span>unstaged ' + Number(snapshot.unstaged_count || 0) + '</span><span>untracked ' + Number(snapshot.untracked_count || 0) + '</span></div></div>').join('')
+                : '<div class="status">No context snapshots.</div>';
+            const artifactItems = artifacts.length
+                ? '<div class="artifact-grid">' + artifacts.map(renderArtifact).join('') + '</div>'
+                : '<div class="status">No artifacts.</div>';
+
+            detailBody.innerHTML =
+                '<p class="detail-body">' + escapeHtml(message.body || '') + '</p>' +
+                '<div class="meta"><span class="badge ' + escapeHtml(message.status) + '">' + escapeHtml(message.status) + '</span><span>' + escapeHtml(message.source) + '</span><span>' + escapeHtml(formatTime(message.created_at)) + '</span></div>' +
+                '<div class="section"><h3>Reply</h3><div class="form-grid"><textarea id="reply-body" placeholder="Reply"></textarea><button class="primary" id="send-reply">Send Reply</button></div></div>' +
+                '<div class="section"><h3>Replies</h3><div class="list">' + replyItems + '</div></div>' +
+                '<div class="section"><h3>Artifacts</h3>' + artifactItems + '</div>' +
+                '<div class="section"><h3>Context</h3><div class="list">' + contextItems + '</div></div>';
+
+            document.getElementById('send-reply').addEventListener('click', () => sendReply(message.id));
+        }
+
+        function renderArtifact(artifact) {
+            const contentUrl = '/api/artifacts/' + encodeURIComponent(artifact.id) + '/content' + authQuery();
+            const preview = artifact.media_type && artifact.media_type.startsWith('image/')
+                ? '<img src="' + contentUrl + '" alt="' + escapeHtml(artifact.kind) + '">'
+                : '<a href="' + contentUrl + '">Open artifact</a>';
+            return '<div class="artifact row">' + preview + '<div class="preview">' + escapeHtml(artifact.kind) + ' / ' + escapeHtml(artifact.media_type) + '</div><div class="meta"><span>' + Number(artifact.size_bytes || 0) + ' bytes</span></div></div>';
+        }
+
+        async function sendReply(messageId) {
+            const field = document.getElementById('reply-body');
+            const body = field.value.trim();
+            if (!body) return;
+            const response = await guardedFetch('/api/messages/' + encodeURIComponent(messageId) + '/replies', {
+                method: 'POST',
+                headers: authHeaders({ 'Content-Type': 'application/json' }),
+                body: JSON.stringify({ body, source: 'pwa' })
+            });
+            if (response.ok) {
+                field.value = '';
+                await openMessage(messageId, false);
+                await loadInbox();
+            }
+        }
+
+        async function loadEvents() {
+            if (!token) {
+                eventList.innerHTML = '<div class="status error">Pairing required.</div>';
+                return;
+            }
+            const response = await guardedFetch('/api/events?limit=50', { headers: authHeaders() });
+            if (!response.ok) {
+                eventList.innerHTML = '<div class="status error">Unable to load events.</div>';
+                return;
+            }
+            const events = await response.json();
+            eventList.innerHTML = events.length ? events.map(renderEvent).join('') : '<div class="status">No events.</div>';
+        }
+
+        function renderEvent(event) {
+            let data = event.data_json || '';
+            try { data = JSON.stringify(JSON.parse(data)); } catch (_) {}
+            return '<div class="row"><div class="row-title"><span>#' + Number(event.seq || 0) + ' ' + escapeHtml(event.event_type) + '</span><span class="badge">' + escapeHtml(event.actor) + '</span></div><div class="preview">' + escapeHtml(data) + '</div><div class="meta"><span>' + escapeHtml(event.source) + '</span><span>' + escapeHtml(formatTime(event.inserted_at)) + '</span></div></div>';
+        }
 
         async function enableNotifications() {
-            enableBtn.disabled = true;
-            let stage = 'starting';
+            const button = document.getElementById('enable-notifications');
+            button.disabled = true;
+            let stage = 'start';
             try {
-                token = getSignalToken();
-                if (!token) throw new Error('pairing_required: open /pair from the dashboard or use /app?token=dev-token');
-
-                stage = 'capability_check';
+                if (!token) throw new Error('pairing_required');
+                stage = 'service_worker';
                 if (!('serviceWorker' in navigator)) throw new Error('service_worker_unsupported');
                 if (!('PushManager' in window)) throw new Error('push_manager_unsupported');
                 if (!('Notification' in window)) throw new Error('notifications_unsupported');
 
-                stage = 'service_worker_register_failed';
-                showStatus('Registering service worker...', 'info');
+                setStatus(notificationStatus, 'Registering service worker...', '');
                 const registration = await navigator.serviceWorker.register('/service-worker.js', { scope: '/' });
                 await navigator.serviceWorker.ready;
 
-                stage = 'notification_permission_denied';
-                const permission = Notification.permission === 'granted'
-                    ? 'granted'
-                    : await Notification.requestPermission();
+                stage = 'permission';
+                const permission = Notification.permission === 'granted' ? 'granted' : await Notification.requestPermission();
                 if (permission !== 'granted') throw new Error('notification_permission_denied');
 
-                stage = 'vapid_fetch_failed';
-                showStatus('Fetching VAPID public key...', 'info');
-                const keyResponse = await guardedFetch('/api/push/vapid-public-key', {
-                    headers: authHeaders()
-                });
+                stage = 'vapid';
+                const keyResponse = await guardedFetch('/api/push/vapid-public-key', { headers: authHeaders() });
                 const keyBody = await parseJsonResponse(keyResponse);
-                if (!keyResponse.ok) throw new Error('vapid_fetch_failed: ' + (keyBody.message || keyResponse.status));
-
-                stage = 'vapid_invalid_key';
+                if (!keyResponse.ok) throw new Error(keyBody.message || 'vapid_fetch_failed');
                 const publicKey = keyBody.publicKey || keyBody.public_key;
-                if (!publicKey || typeof publicKey !== 'string') throw new Error('vapid_invalid_key: missing publicKey');
                 const applicationServerKey = urlBase64ToUint8Array(publicKey);
                 if (applicationServerKey.length !== 65 || applicationServerKey[0] !== 4) {
-                    throw new Error('vapid_invalid_key: decoded length=' + applicationServerKey.length + ', firstByte=' + applicationServerKey[0]);
+                    throw new Error('vapid_invalid_key');
                 }
 
-                stage = 'push_subscribe_failed';
-                showStatus('Creating browser push subscription...', 'info');
+                stage = 'subscribe';
                 let subscription = await registration.pushManager.getSubscription();
                 if (!subscription) {
                     subscription = await registration.pushManager.subscribe({
@@ -279,12 +734,7 @@
                 }
 
                 const subscriptionJson = subscription.toJSON();
-                if (!subscriptionJson.endpoint || !subscriptionJson.keys?.p256dh || !subscriptionJson.keys?.auth) {
-                    throw new Error('push_subscribe_failed: subscription missing endpoint or keys');
-                }
-
-                stage = 'push_subscription_save_failed';
-                showStatus('Saving push subscription...', 'info');
+                stage = 'save';
                 const saveResponse = await guardedFetch('/api/push/subscribe', {
                     method: 'POST',
                     headers: authHeaders({ 'Content-Type': 'application/json' }),
@@ -299,16 +749,50 @@
                 });
                 const saveBody = await parseJsonResponse(saveResponse);
                 if (!saveResponse.ok || saveBody.success === false) {
-                    throw new Error('push_subscription_save_failed: ' + (saveBody.message || saveResponse.status));
+                    throw new Error(saveBody.message || 'push_subscription_save_failed');
                 }
-
-                showStatus('Push notifications enabled. Key length=' + applicationServerKey.length + ', firstByte=' + applicationServerKey[0], 'success');
+                setStatus(notificationStatus, 'Notifications enabled.', 'ok');
                 await loadInbox();
             } catch (error) {
-                console.error('Notification enable failed at stage:', stage, error);
-                showStatus(stage + ': ' + (error.message || error), 'error');
+                setStatus(notificationStatus, stage + ': ' + (error.message || error), 'error');
             } finally {
-                enableBtn.disabled = false;
+                button.disabled = false;
+            }
+        }
+
+        async function sendWake() {
+            const agent = document.getElementById('wake-agent').value.trim() || 'codex';
+            const project = document.getElementById('wake-project').value.trim() || undefined;
+            const body = document.getElementById('wake-body').value.trim() || 'hello';
+            setStatus(wakeStatus, 'Sending...', '');
+            const response = await guardedFetch('/api/messages', {
+                method: 'POST',
+                headers: authHeaders({ 'Content-Type': 'application/json' }),
+                body: JSON.stringify({
+                    title: 'Wake ' + agent,
+                    body,
+                    source: 'pwa',
+                    agent_id: agent,
+                    project,
+                    permission_level: 'ai_readable'
+                })
+            });
+            const payload = await parseJsonResponse(response);
+            if (!response.ok) {
+                setStatus(wakeStatus, payload.message || 'Wake ping failed.', 'error');
+                return;
+            }
+            setStatus(wakeStatus, 'Sent: ' + payload.id, 'ok');
+            showTab('inbox');
+            await loadInbox();
+            await openMessage(payload.id, true);
+        }
+
+        function refreshDeviceState() {
+            token = getSignalToken();
+            tokenLine.textContent = token ? 'Token: stored' : 'Token: missing';
+            if (!notificationStatus.textContent) {
+                notificationStatus.textContent = ('Notification' in window) ? 'Permission: ' + Notification.permission : 'Permission: unknown';
             }
         }
 
@@ -321,55 +805,11 @@
             return outputArray;
         }
 
-        async function loadInbox() {
-            try {
-                token = getSignalToken();
-                if (!token) {
-                    showPairAgain('Pair this device or open /app?token=dev-token.');
-                    return;
-                }
-
-                const [messagesResponse, pushResponse] = await Promise.all([
-                    guardedFetch('/api/messages?limit=25', { headers: authHeaders() }),
-                    guardedFetch('/api/push/status', { headers: authHeaders() })
-                ]);
-
-                if (pushResponse.ok) {
-                    const status = await pushResponse.json();
-                    pushStatus.textContent = 'Push: ' + (status.web_push_enabled ? 'enabled' : 'disabled') +
-                        ', subscriptions: ' + status.subscriptions_count;
-                } else {
-                    pushStatus.textContent = 'Push: status unavailable (' + pushResponse.status + ')';
-                }
-
-                if (!messagesResponse.ok) {
-                    const body = await parseJsonResponse(messagesResponse);
-                    messageList.innerHTML = '<div class="status status-error">Unable to load inbox: ' + escapeHtml(body.message || messagesResponse.status) + '</div>';
-                    return;
-                }
-
-                const messages = await messagesResponse.json();
-                const activeMessages = messages.filter((message) => message.status !== 'archived');
-                if (activeMessages.length === 0) {
-                    messageList.innerHTML = '<div class="note">No active messages.</div>';
-                    return;
-                }
-
-                messageList.innerHTML = activeMessages.map((message) => {
-                    const href = '/message/' + encodeURIComponent(message.id) + '?device_token=' + encodeURIComponent(token);
-                    const meta = [message.source, message.project, message.agent_id].filter(Boolean).join(' / ');
-                    return '<a class="message-link" href="' + href + '">' +
-                        '<div class="message-row"><span class="message-title">' + escapeHtml(message.title) + '</span>' +
-                        '<span class="badge">' + escapeHtml(message.status) + '</span></div>' +
-                        '<div class="message-preview">' + escapeHtml(message.body || '') + '</div>' +
-                        '<div class="message-meta">' + escapeHtml(meta) + '</div>' +
-                        '</a>';
-                }).join('');
-            } catch (error) {
-                if (!String(error.message || error).includes('device_revoked')) {
-                    messageList.innerHTML = '<div class="status status-error">Inbox error: ' + escapeHtml(error.message || error) + '</div>';
-                }
-            }
+        function formatTime(value) {
+            if (!value) return '';
+            const date = new Date(value);
+            if (Number.isNaN(date.getTime())) return value;
+            return date.toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
         }
 
         function escapeHtml(value) {
@@ -381,6 +821,44 @@
                 .replace(/'/g, '&#039;');
         }
 
+        document.querySelectorAll('.tab').forEach((button) => button.addEventListener('click', () => showTab(button.dataset.tab)));
+        document.getElementById('refresh').addEventListener('click', () => {
+            if (currentTab === 'events') loadEvents();
+            else loadInbox();
+        });
+        document.getElementById('close-detail').addEventListener('click', () => {
+            currentMessageId = null;
+            detailPanel.classList.add('hidden');
+            inboxGrid.classList.remove('detail-open');
+            if (history.pushState) history.pushState({}, document.title, '/app');
+        });
+        document.getElementById('theme-toggle').addEventListener('click', toggleTheme);
+        document.getElementById('load-events').addEventListener('click', loadEvents);
+        document.getElementById('enable-notifications').addEventListener('click', enableNotifications);
+        document.getElementById('clear-pairing').addEventListener('click', () => {
+            localStorage.removeItem('signal_device_token');
+            localStorage.removeItem('signal_token');
+            token = '';
+            refreshDeviceState();
+            showPairingRequired('Local pairing cleared.');
+        });
+        document.getElementById('send-wake').addEventListener('click', sendWake);
+        window.addEventListener('popstate', () => {
+            currentMessageId = new URLSearchParams(location.search).get('message');
+            if (currentMessageId) openMessage(currentMessageId, false);
+        });
+        navigator.serviceWorker?.addEventListener('message', (event) => {
+            if (event.data?.type === 'open-url' && event.data.url) {
+                const url = new URL(event.data.url);
+                const messageId = url.searchParams.get('message');
+                if (messageId) {
+                    showTab('inbox');
+                    openMessage(messageId, true);
+                }
+            }
+        });
+
+        applyTheme();
         loadInbox();
     </script>
 </body>

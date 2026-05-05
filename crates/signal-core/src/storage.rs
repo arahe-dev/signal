@@ -1,11 +1,14 @@
 use crate::models::{
-    Event, Message, MessageStatus, OutboxEntry, PushSubscription, Reply, ReplyStatus,
+    ArtifactMetadata, ContextSnapshot, Event, EventLogEntry, Grant, GrantUse, Message,
+    MessageStatus, OutboxEntry, PushSubscription, Reply, ReplyStatus,
 };
 use rusqlite::{params, Connection, OptionalExtension};
+use sha2::{Digest, Sha256};
 use std::path::Path;
 use std::sync::Mutex;
 use thiserror::Error;
 use tracing::info;
+use uuid::Uuid;
 
 #[derive(Error, Debug)]
 pub enum StorageError {
@@ -15,6 +18,8 @@ pub enum StorageError {
     Json(#[from] serde_json::Error),
     #[error("Not found: {0}")]
     NotFound(String),
+    #[error("Permission denied: {0}")]
+    PermissionDenied(String),
 }
 
 #[derive(Debug, Clone, Default)]
@@ -69,9 +74,160 @@ fn push_subscription_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<PushS
     })
 }
 
+fn parse_utc(value: String) -> chrono::DateTime<chrono::Utc> {
+    chrono::DateTime::parse_from_rfc3339(&value)
+        .map(|dt| dt.with_timezone(&chrono::Utc))
+        .unwrap_or_else(|_| chrono::Utc::now())
+}
+
+fn parse_optional_utc(value: Option<String>) -> Option<chrono::DateTime<chrono::Utc>> {
+    value.and_then(|s| {
+        chrono::DateTime::parse_from_rfc3339(&s)
+            .map(|dt| dt.with_timezone(&chrono::Utc))
+            .ok()
+    })
+}
+
+fn event_log_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<EventLogEntry> {
+    Ok(EventLogEntry {
+        seq: Some(row.get(0)?),
+        event_id: row.get(1)?,
+        event_type: row.get(2)?,
+        source: row.get(3)?,
+        actor: row.get(4)?,
+        subject: row.get(5)?,
+        visibility: row.get::<_, String>(6)?.parse().unwrap_or_default(),
+        event_time: parse_utc(row.get(7)?),
+        inserted_at: parse_utc(row.get(8)?),
+        datacontenttype: row.get(9)?,
+        dataschema: row.get(10)?,
+        data_json: row.get(11)?,
+        extensions_json: row.get(12)?,
+        idempotency_key: row.get(13)?,
+        correlation_id: row.get(14)?,
+        causation_id: row.get(15)?,
+        trace_id: row.get(16)?,
+        span_id: row.get(17)?,
+        resource: row.get(18)?,
+        prev_hash: row.get(19)?,
+        event_hash: row.get(20)?,
+    })
+}
+
+fn grant_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Grant> {
+    Ok(Grant {
+        id: row.get(0)?,
+        token_hash: row.get(1)?,
+        token_prefix: row.get(2)?,
+        issued_to: row.get(3)?,
+        issued_by: row.get(4)?,
+        scopes_json: row.get(5)?,
+        resources_json: row.get(6)?,
+        expires_at: parse_optional_utc(row.get(7)?),
+        max_uses: row.get(8)?,
+        uses: row.get(9)?,
+        requires_human: row.get::<_, i64>(10)? != 0,
+        status: row.get(11)?,
+        created_at: parse_utc(row.get(12)?),
+        revoked_at: parse_optional_utc(row.get(13)?),
+        metadata_json: row.get(14)?,
+    })
+}
+
+fn context_snapshot_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ContextSnapshot> {
+    Ok(ContextSnapshot {
+        id: row.get(0)?,
+        message_id: row.get(1)?,
+        captured_at: parse_utc(row.get(2)?),
+        source: row.get(3)?,
+        stage: row.get(4)?,
+        repo_root_hash: row.get(5)?,
+        repo_root_display: row.get(6)?,
+        git_common_dir_hash: row.get(7)?,
+        worktree_id: row.get(8)?,
+        worktree_path_display: row.get(9)?,
+        branch: row.get(10)?,
+        head_oid: row.get(11)?,
+        upstream: row.get(12)?,
+        ahead: row.get(13)?,
+        behind: row.get(14)?,
+        dirty: row.get::<_, i64>(15)? != 0,
+        staged_count: row.get(16)?,
+        unstaged_count: row.get(17)?,
+        untracked_count: row.get(18)?,
+        status_json: row.get(19)?,
+        worktrees_json: row.get(20)?,
+        staged_patch_id: row.get(21)?,
+        staged_patch_sha256: row.get(22)?,
+        unstaged_patch_id: row.get(23)?,
+        unstaged_patch_sha256: row.get(24)?,
+        post_commit_oid: row.get(25)?,
+        expires_at: parse_optional_utc(row.get(26)?),
+        pinned: row.get::<_, i64>(27)? != 0,
+    })
+}
+
+fn artifact_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ArtifactMetadata> {
+    Ok(ArtifactMetadata {
+        id: row.get(0)?,
+        message_id: row.get(1)?,
+        snapshot_id: row.get(2)?,
+        kind: row.get(3)?,
+        media_type: row.get(4)?,
+        sha256: row.get(5)?,
+        size_bytes: row.get(6)?,
+        storage_uri: row.get(7)?,
+        width: row.get(8)?,
+        height: row.get(9)?,
+        created_at: parse_utc(row.get(10)?),
+        expires_at: parse_optional_utc(row.get(11)?),
+        pinned: row.get::<_, i64>(12)? != 0,
+        metadata_json: row.get(13)?,
+    })
+}
+
+fn event_log_select_sql() -> &'static str {
+    "SELECT seq, event_id, event_type, source, actor, subject, visibility, event_time,
+            inserted_at, datacontenttype, dataschema, data_json, extensions_json,
+            idempotency_key, correlation_id, causation_id, trace_id, span_id, resource,
+            prev_hash, event_hash
+     FROM event_log"
+}
+
+fn compute_event_hash(event: &EventLogEntry, prev_hash: Option<&str>) -> String {
+    let mut hasher = Sha256::new();
+    for part in [
+        prev_hash.unwrap_or(""),
+        &event.event_id,
+        &event.event_type,
+        &event.source,
+        &event.actor,
+        event.subject.as_deref().unwrap_or(""),
+        &event.visibility.to_string(),
+        &event.event_time.to_rfc3339(),
+        &event.data_json,
+        &event.extensions_json,
+        event.idempotency_key.as_deref().unwrap_or(""),
+        event.correlation_id.as_deref().unwrap_or(""),
+        event.causation_id.as_deref().unwrap_or(""),
+        event.trace_id.as_deref().unwrap_or(""),
+        event.span_id.as_deref().unwrap_or(""),
+        event.resource.as_deref().unwrap_or(""),
+    ] {
+        hasher.update(part.as_bytes());
+        hasher.update([0]);
+    }
+    format!("{:x}", hasher.finalize())
+}
+
 impl Storage {
     pub fn new<P: AsRef<Path>>(path: P) -> Result<Self, StorageError> {
         let conn = Connection::open(path)?;
+        conn.execute_batch(
+            "PRAGMA foreign_keys = ON;
+             PRAGMA busy_timeout = 5000;
+             PRAGMA journal_mode = WAL;",
+        )?;
         let storage = Self {
             conn: Mutex::new(conn),
         };
@@ -188,6 +344,129 @@ impl Storage {
             [],
         )?;
 
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS event_log (
+                seq INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_id TEXT NOT NULL,
+                event_type TEXT NOT NULL,
+                source TEXT NOT NULL,
+                actor TEXT NOT NULL,
+                subject TEXT,
+                visibility TEXT NOT NULL DEFAULT 'private',
+                event_time TEXT NOT NULL,
+                inserted_at TEXT NOT NULL,
+                datacontenttype TEXT NOT NULL DEFAULT 'application/json',
+                dataschema TEXT,
+                data_json TEXT NOT NULL,
+                extensions_json TEXT NOT NULL DEFAULT '{}',
+                idempotency_key TEXT,
+                correlation_id TEXT,
+                causation_id TEXT,
+                trace_id TEXT,
+                span_id TEXT,
+                resource TEXT,
+                prev_hash TEXT,
+                event_hash TEXT NOT NULL,
+                UNIQUE(source, event_id)
+            )",
+            [],
+        )?;
+
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS grants (
+                id TEXT PRIMARY KEY,
+                token_hash TEXT NOT NULL UNIQUE,
+                token_prefix TEXT NOT NULL,
+                issued_to TEXT NOT NULL,
+                issued_by TEXT NOT NULL,
+                scopes_json TEXT NOT NULL,
+                resources_json TEXT NOT NULL,
+                expires_at TEXT,
+                max_uses INTEGER,
+                uses INTEGER NOT NULL DEFAULT 0,
+                requires_human INTEGER NOT NULL DEFAULT 1,
+                status TEXT NOT NULL DEFAULT 'active',
+                created_at TEXT NOT NULL,
+                revoked_at TEXT,
+                metadata_json TEXT
+            )",
+            [],
+        )?;
+
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS grant_uses (
+                id TEXT PRIMARY KEY,
+                grant_id TEXT NOT NULL,
+                event_seq INTEGER,
+                actor TEXT NOT NULL,
+                scope TEXT NOT NULL,
+                resource TEXT,
+                decision TEXT NOT NULL,
+                reason TEXT,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (grant_id) REFERENCES grants(id),
+                FOREIGN KEY (event_seq) REFERENCES event_log(seq)
+            )",
+            [],
+        )?;
+
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS context_snapshots (
+                id TEXT PRIMARY KEY,
+                message_id TEXT NOT NULL,
+                captured_at TEXT NOT NULL,
+                source TEXT NOT NULL,
+                stage TEXT NOT NULL,
+                repo_root_hash TEXT,
+                repo_root_display TEXT,
+                git_common_dir_hash TEXT,
+                worktree_id TEXT,
+                worktree_path_display TEXT,
+                branch TEXT,
+                head_oid TEXT,
+                upstream TEXT,
+                ahead INTEGER,
+                behind INTEGER,
+                dirty INTEGER NOT NULL DEFAULT 0,
+                staged_count INTEGER NOT NULL DEFAULT 0,
+                unstaged_count INTEGER NOT NULL DEFAULT 0,
+                untracked_count INTEGER NOT NULL DEFAULT 0,
+                status_json TEXT NOT NULL,
+                worktrees_json TEXT,
+                staged_patch_id TEXT,
+                staged_patch_sha256 TEXT,
+                unstaged_patch_id TEXT,
+                unstaged_patch_sha256 TEXT,
+                post_commit_oid TEXT,
+                expires_at TEXT,
+                pinned INTEGER NOT NULL DEFAULT 0,
+                FOREIGN KEY (message_id) REFERENCES messages(id)
+            )",
+            [],
+        )?;
+
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS artifacts (
+                id TEXT PRIMARY KEY,
+                message_id TEXT NOT NULL,
+                snapshot_id TEXT,
+                kind TEXT NOT NULL,
+                media_type TEXT NOT NULL,
+                sha256 TEXT NOT NULL,
+                size_bytes INTEGER NOT NULL,
+                storage_uri TEXT NOT NULL,
+                width INTEGER,
+                height INTEGER,
+                created_at TEXT NOT NULL,
+                expires_at TEXT,
+                pinned INTEGER NOT NULL DEFAULT 0,
+                metadata_json TEXT,
+                FOREIGN KEY (message_id) REFERENCES messages(id),
+                FOREIGN KEY (snapshot_id) REFERENCES context_snapshots(id)
+            )",
+            [],
+        )?;
+
         let _ = conn.execute(
             "ALTER TABLE push_subscriptions ADD COLUMN vapid_public_key_hash TEXT",
             [],
@@ -233,6 +512,56 @@ impl Storage {
         )?;
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_replies_status ON replies(status)",
+            [],
+        )?;
+
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_event_log_seq ON event_log(seq)",
+            [],
+        )?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_event_log_type_seq ON event_log(event_type, seq)",
+            [],
+        )?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_event_log_subject_seq ON event_log(subject, seq)",
+            [],
+        )?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_event_log_correlation_seq ON event_log(correlation_id, seq)",
+            [],
+        )?;
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS ux_event_log_idempotency
+             ON event_log(idempotency_key)
+             WHERE idempotency_key IS NOT NULL",
+            [],
+        )?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_grants_token_hash ON grants(token_hash)",
+            [],
+        )?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_grants_status_expires ON grants(status, expires_at)",
+            [],
+        )?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_grant_uses_grant_id ON grant_uses(grant_id)",
+            [],
+        )?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_context_snapshots_message_id
+             ON context_snapshots(message_id, captured_at)",
+            [],
+        )?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_artifacts_message_id
+             ON artifacts(message_id, created_at)",
+            [],
+        )?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_artifacts_snapshot_id
+             ON artifacts(snapshot_id)",
             [],
         )?;
 
@@ -599,6 +928,437 @@ impl Storage {
             events.push(row?);
         }
         Ok(events)
+    }
+
+    pub fn append_event_log(&self, event: &EventLogEntry) -> Result<EventLogEntry, StorageError> {
+        let conn = self.conn.lock().unwrap();
+        let mut event = event.clone();
+        let prev_hash = conn
+            .query_row(
+                "SELECT event_hash FROM event_log ORDER BY seq DESC LIMIT 1",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        event.seq = None;
+        event.inserted_at = chrono::Utc::now();
+        event.prev_hash = prev_hash.clone();
+        event.event_hash = compute_event_hash(&event, prev_hash.as_deref());
+
+        let inserted = conn.execute(
+            "INSERT OR IGNORE INTO event_log (
+                event_id, event_type, source, actor, subject, visibility, event_time,
+                inserted_at, datacontenttype, dataschema, data_json, extensions_json,
+                idempotency_key, correlation_id, causation_id, trace_id, span_id,
+                resource, prev_hash, event_hash
+             )
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
+            params![
+                event.event_id,
+                event.event_type,
+                event.source,
+                event.actor,
+                event.subject,
+                event.visibility.to_string(),
+                event.event_time.to_rfc3339(),
+                event.inserted_at.to_rfc3339(),
+                event.datacontenttype,
+                event.dataschema,
+                event.data_json,
+                event.extensions_json,
+                event.idempotency_key,
+                event.correlation_id,
+                event.causation_id,
+                event.trace_id,
+                event.span_id,
+                event.resource,
+                event.prev_hash,
+                event.event_hash,
+            ],
+        )?;
+
+        if inserted == 0 {
+            if let Some(idempotency_key) = event.idempotency_key.as_deref() {
+                let sql = format!("{} WHERE idempotency_key = ?1", event_log_select_sql());
+                let existing =
+                    conn.query_row(&sql, params![idempotency_key], event_log_from_row)?;
+                return Ok(existing);
+            }
+        }
+
+        let sql = format!(
+            "{} WHERE source = ?1 AND event_id = ?2",
+            event_log_select_sql()
+        );
+        let inserted = conn.query_row(
+            &sql,
+            params![event.source, event.event_id],
+            event_log_from_row,
+        )?;
+        Ok(inserted)
+    }
+
+    pub fn get_event_log_by_source_id(
+        &self,
+        source: &str,
+        event_id: &str,
+    ) -> Result<EventLogEntry, StorageError> {
+        let conn = self.conn.lock().unwrap();
+        let sql = format!(
+            "{} WHERE source = ?1 AND event_id = ?2",
+            event_log_select_sql()
+        );
+        conn.query_row(&sql, params![source, event_id], event_log_from_row)
+            .map_err(|_| StorageError::NotFound(format!("Event not found: {source}/{event_id}")))
+    }
+
+    pub fn list_event_log(
+        &self,
+        after_seq: Option<i64>,
+        limit: Option<i64>,
+    ) -> Result<Vec<EventLogEntry>, StorageError> {
+        let conn = self.conn.lock().unwrap();
+        let limit = limit.unwrap_or(100).clamp(1, 1000);
+        let mut events = Vec::new();
+
+        if let Some(after_seq) = after_seq {
+            let sql = format!(
+                "{} WHERE seq > ?1 ORDER BY seq ASC LIMIT ?2",
+                event_log_select_sql()
+            );
+            let mut stmt = conn.prepare(&sql)?;
+            let rows = stmt.query_map(params![after_seq, limit], event_log_from_row)?;
+            for row in rows {
+                events.push(row?);
+            }
+        } else {
+            let sql = format!("{} ORDER BY seq ASC LIMIT ?1", event_log_select_sql());
+            let mut stmt = conn.prepare(&sql)?;
+            let rows = stmt.query_map(params![limit], event_log_from_row)?;
+            for row in rows {
+                events.push(row?);
+            }
+        }
+
+        Ok(events)
+    }
+
+    pub fn create_grant(&self, grant: &Grant) -> Result<(), StorageError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO grants (
+                id, token_hash, token_prefix, issued_to, issued_by, scopes_json,
+                resources_json, expires_at, max_uses, uses, requires_human, status,
+                created_at, revoked_at, metadata_json
+             )
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+            params![
+                grant.id,
+                grant.token_hash,
+                grant.token_prefix,
+                grant.issued_to,
+                grant.issued_by,
+                grant.scopes_json,
+                grant.resources_json,
+                grant.expires_at.map(|dt| dt.to_rfc3339()),
+                grant.max_uses,
+                grant.uses,
+                if grant.requires_human { 1 } else { 0 },
+                grant.status,
+                grant.created_at.to_rfc3339(),
+                grant.revoked_at.map(|dt| dt.to_rfc3339()),
+                grant.metadata_json,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_grant(&self, id: &str) -> Result<Grant, StorageError> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT id, token_hash, token_prefix, issued_to, issued_by, scopes_json,
+                    resources_json, expires_at, max_uses, uses, requires_human, status,
+                    created_at, revoked_at, metadata_json
+             FROM grants WHERE id = ?1",
+            params![id],
+            grant_from_row,
+        )
+        .map_err(|_| StorageError::NotFound(format!("Grant not found: {id}")))
+    }
+
+    pub fn get_active_grant_by_token_hash(&self, token_hash: &str) -> Result<Grant, StorageError> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT id, token_hash, token_prefix, issued_to, issued_by, scopes_json,
+                    resources_json, expires_at, max_uses, uses, requires_human, status,
+                    created_at, revoked_at, metadata_json
+             FROM grants
+             WHERE token_hash = ?1 AND status = 'active'
+             LIMIT 1",
+            params![token_hash],
+            grant_from_row,
+        )
+        .map_err(|_| StorageError::NotFound("Active grant not found".to_string()))
+    }
+
+    pub fn revoke_grant(&self, id: &str) -> Result<(), StorageError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE grants
+             SET status = 'revoked', revoked_at = ?1
+             WHERE id = ?2",
+            params![chrono::Utc::now().to_rfc3339(), id],
+        )?;
+        Ok(())
+    }
+
+    pub fn use_grant(
+        &self,
+        id: &str,
+        actor: &str,
+        scope: &str,
+        resource: Option<&str>,
+        event_seq: Option<i64>,
+    ) -> Result<GrantUse, StorageError> {
+        let conn = self.conn.lock().unwrap();
+        let grant = conn
+            .query_row(
+                "SELECT id, token_hash, token_prefix, issued_to, issued_by, scopes_json,
+                        resources_json, expires_at, max_uses, uses, requires_human, status,
+                        created_at, revoked_at, metadata_json
+                 FROM grants WHERE id = ?1",
+                params![id],
+                grant_from_row,
+            )
+            .map_err(|_| StorageError::NotFound(format!("Grant not found: {id}")))?;
+
+        if grant.status != "active" {
+            return Err(StorageError::PermissionDenied(format!(
+                "Grant is not active: {}",
+                grant.status
+            )));
+        }
+        if grant
+            .expires_at
+            .is_some_and(|expires_at| chrono::Utc::now() > expires_at)
+        {
+            return Err(StorageError::PermissionDenied(
+                "Grant has expired".to_string(),
+            ));
+        }
+        if grant
+            .max_uses
+            .is_some_and(|max_uses| grant.uses >= max_uses)
+        {
+            return Err(StorageError::PermissionDenied(
+                "Grant max uses reached".to_string(),
+            ));
+        }
+
+        let scopes: Vec<String> = serde_json::from_str(&grant.scopes_json).unwrap_or_default();
+        if !scopes.iter().any(|item| item == "*" || item == scope) {
+            return Err(StorageError::PermissionDenied(format!(
+                "Grant scope denied: {scope}"
+            )));
+        }
+
+        let grant_use = GrantUse {
+            id: Uuid::new_v4().to_string(),
+            grant_id: id.to_string(),
+            event_seq,
+            actor: actor.to_string(),
+            scope: scope.to_string(),
+            resource: resource.map(|value| value.to_string()),
+            decision: "allowed".to_string(),
+            reason: None,
+            created_at: chrono::Utc::now(),
+        };
+
+        conn.execute(
+            "UPDATE grants SET uses = uses + 1 WHERE id = ?1",
+            params![id],
+        )?;
+        conn.execute(
+            "INSERT INTO grant_uses (
+                id, grant_id, event_seq, actor, scope, resource, decision, reason, created_at
+             )
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                grant_use.id,
+                grant_use.grant_id,
+                grant_use.event_seq,
+                grant_use.actor,
+                grant_use.scope,
+                grant_use.resource,
+                grant_use.decision,
+                grant_use.reason,
+                grant_use.created_at.to_rfc3339(),
+            ],
+        )?;
+
+        Ok(grant_use)
+    }
+
+    pub fn create_context_snapshot(&self, snapshot: &ContextSnapshot) -> Result<(), StorageError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO context_snapshots (
+                id, message_id, captured_at, source, stage, repo_root_hash,
+                repo_root_display, git_common_dir_hash, worktree_id, worktree_path_display,
+                branch, head_oid, upstream, ahead, behind, dirty, staged_count,
+                unstaged_count, untracked_count, status_json, worktrees_json,
+                staged_patch_id, staged_patch_sha256, unstaged_patch_id,
+                unstaged_patch_sha256, post_commit_oid, expires_at, pinned
+             )
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
+                     ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28)",
+            params![
+                snapshot.id,
+                snapshot.message_id,
+                snapshot.captured_at.to_rfc3339(),
+                snapshot.source,
+                snapshot.stage,
+                snapshot.repo_root_hash,
+                snapshot.repo_root_display,
+                snapshot.git_common_dir_hash,
+                snapshot.worktree_id,
+                snapshot.worktree_path_display,
+                snapshot.branch,
+                snapshot.head_oid,
+                snapshot.upstream,
+                snapshot.ahead,
+                snapshot.behind,
+                if snapshot.dirty { 1 } else { 0 },
+                snapshot.staged_count,
+                snapshot.unstaged_count,
+                snapshot.untracked_count,
+                snapshot.status_json,
+                snapshot.worktrees_json,
+                snapshot.staged_patch_id,
+                snapshot.staged_patch_sha256,
+                snapshot.unstaged_patch_id,
+                snapshot.unstaged_patch_sha256,
+                snapshot.post_commit_oid,
+                snapshot.expires_at.map(|dt| dt.to_rfc3339()),
+                if snapshot.pinned { 1 } else { 0 },
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_context_snapshot(&self, id: &str) -> Result<ContextSnapshot, StorageError> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT id, message_id, captured_at, source, stage, repo_root_hash,
+                    repo_root_display, git_common_dir_hash, worktree_id, worktree_path_display,
+                    branch, head_oid, upstream, ahead, behind, dirty, staged_count,
+                    unstaged_count, untracked_count, status_json, worktrees_json,
+                    staged_patch_id, staged_patch_sha256, unstaged_patch_id,
+                    unstaged_patch_sha256, post_commit_oid, expires_at, pinned
+             FROM context_snapshots WHERE id = ?1",
+            params![id],
+            context_snapshot_from_row,
+        )
+        .map_err(|_| StorageError::NotFound(format!("Context snapshot not found: {id}")))
+    }
+
+    pub fn list_context_snapshots(
+        &self,
+        message_id: &str,
+    ) -> Result<Vec<ContextSnapshot>, StorageError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, message_id, captured_at, source, stage, repo_root_hash,
+                    repo_root_display, git_common_dir_hash, worktree_id, worktree_path_display,
+                    branch, head_oid, upstream, ahead, behind, dirty, staged_count,
+                    unstaged_count, untracked_count, status_json, worktrees_json,
+                    staged_patch_id, staged_patch_sha256, unstaged_patch_id,
+                    unstaged_patch_sha256, post_commit_oid, expires_at, pinned
+             FROM context_snapshots
+             WHERE message_id = ?1
+             ORDER BY captured_at ASC",
+        )?;
+        let rows = stmt.query_map(params![message_id], context_snapshot_from_row)?;
+        let mut snapshots = Vec::new();
+        for row in rows {
+            snapshots.push(row?);
+        }
+        Ok(snapshots)
+    }
+
+    pub fn create_artifact_metadata(
+        &self,
+        artifact: &ArtifactMetadata,
+    ) -> Result<(), StorageError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO artifacts (
+                id, message_id, snapshot_id, kind, media_type, sha256, size_bytes,
+                storage_uri, width, height, created_at, expires_at, pinned, metadata_json
+             )
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+            params![
+                artifact.id,
+                artifact.message_id,
+                artifact.snapshot_id,
+                artifact.kind,
+                artifact.media_type,
+                artifact.sha256,
+                artifact.size_bytes,
+                artifact.storage_uri,
+                artifact.width,
+                artifact.height,
+                artifact.created_at.to_rfc3339(),
+                artifact.expires_at.map(|dt| dt.to_rfc3339()),
+                if artifact.pinned { 1 } else { 0 },
+                artifact.metadata_json,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_artifact_metadata(&self, id: &str) -> Result<ArtifactMetadata, StorageError> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT id, message_id, snapshot_id, kind, media_type, sha256, size_bytes,
+                    storage_uri, width, height, created_at, expires_at, pinned, metadata_json
+             FROM artifacts WHERE id = ?1",
+            params![id],
+            artifact_from_row,
+        )
+        .map_err(|_| StorageError::NotFound(format!("Artifact metadata not found: {id}")))
+    }
+
+    pub fn list_artifacts_for_message(
+        &self,
+        message_id: &str,
+    ) -> Result<Vec<ArtifactMetadata>, StorageError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, message_id, snapshot_id, kind, media_type, sha256, size_bytes,
+                    storage_uri, width, height, created_at, expires_at, pinned, metadata_json
+             FROM artifacts
+             WHERE message_id = ?1
+             ORDER BY created_at ASC",
+        )?;
+        let rows = stmt.query_map(params![message_id], artifact_from_row)?;
+        let mut artifacts = Vec::new();
+        for row in rows {
+            artifacts.push(row?);
+        }
+        Ok(artifacts)
+    }
+
+    pub fn sweep_expired_artifact_metadata(&self) -> Result<usize, StorageError> {
+        let conn = self.conn.lock().unwrap();
+        let count = conn.execute(
+            "DELETE FROM artifacts
+             WHERE pinned = 0
+               AND expires_at IS NOT NULL
+               AND expires_at < ?1",
+            params![chrono::Utc::now().to_rfc3339()],
+        )?;
+        Ok(count)
     }
 
     pub fn create_outbox_entry(&self, entry: &OutboxEntry) -> Result<(), StorageError> {
@@ -1147,7 +1907,10 @@ impl Storage {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::{Device, Message, PairingCode, PermissionLevel, PushSubscription};
+    use crate::models::{
+        ArtifactMetadata, ContextSnapshot, Device, EventLogEntry, Grant, Message, PairingCode,
+        PermissionLevel, PushSubscription,
+    };
     use tempfile::NamedTempFile;
 
     fn make_storage() -> Storage {
@@ -1314,6 +2077,119 @@ mod tests {
         assert!(stored.expires_at.is_some());
         assert_eq!(stored.priority.as_deref(), Some("normal"));
         assert_eq!(stored.reply_mode.as_deref(), Some("text"));
+    }
+
+    #[test]
+    fn event_log_append_is_idempotent_and_hash_chained() {
+        let storage = make_storage();
+        let mut event = EventLogEntry::new(
+            "signal.test.created".to_string(),
+            "test".to_string(),
+            "agent:codex".to_string(),
+            serde_json::json!({"ok": true}).to_string(),
+        );
+        event.idempotency_key = Some("test-idempotency-key".to_string());
+
+        let first = storage.append_event_log(&event).unwrap();
+        let second = storage.append_event_log(&event).unwrap();
+        assert_eq!(first.seq, second.seq);
+        assert_eq!(first.event_hash.len(), 64);
+
+        let next = EventLogEntry::new(
+            "signal.test.updated".to_string(),
+            "test".to_string(),
+            "agent:codex".to_string(),
+            serde_json::json!({"ok": false}).to_string(),
+        );
+        let next = storage.append_event_log(&next).unwrap();
+        assert_eq!(next.prev_hash.as_deref(), Some(first.event_hash.as_str()));
+
+        let events = storage.list_event_log(first.seq, Some(10)).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event_type, "signal.test.updated");
+    }
+
+    #[test]
+    fn grant_use_enforces_scope_and_max_uses() {
+        let storage = make_storage();
+        let grant = Grant::new(
+            crate::hash_token("grant-token"),
+            "grant".to_string(),
+            "agent:codex".to_string(),
+            "user:local".to_string(),
+            vec!["messages:send".to_string()],
+            serde_json::json!({"messages": "*"}),
+            Some(60),
+        );
+        storage.create_grant(&grant).unwrap();
+
+        let grant_use = storage
+            .use_grant(
+                &grant.id,
+                "agent:codex",
+                "messages:send",
+                Some("message:test"),
+                None,
+            )
+            .unwrap();
+        assert_eq!(grant_use.decision, "allowed");
+        assert_eq!(storage.get_grant(&grant.id).unwrap().uses, 1);
+
+        assert!(storage
+            .use_grant(&grant.id, "agent:codex", "messages:send", None, None)
+            .is_err());
+        assert!(storage
+            .use_grant(&grant.id, "agent:codex", "artifacts:write", None, None)
+            .is_err());
+    }
+
+    #[test]
+    fn context_and_artifact_metadata_roundtrip() {
+        let storage = make_storage();
+        let message = make_message("context", MessageStatus::PendingReply, Some("signal"), None);
+        storage.create_message(&message).unwrap();
+
+        let mut snapshot = ContextSnapshot::new(
+            message.id.clone(),
+            "agent:codex".to_string(),
+            "ping-sent".to_string(),
+            serde_json::json!({"branch": "signal-architecture-plan"}).to_string(),
+        );
+        snapshot.branch = Some("signal-architecture-plan".to_string());
+        snapshot.dirty = true;
+        snapshot.staged_count = 1;
+        storage.create_context_snapshot(&snapshot).unwrap();
+
+        let snapshots = storage.list_context_snapshots(&message.id).unwrap();
+        assert_eq!(snapshots.len(), 1);
+        assert_eq!(
+            snapshots[0].branch.as_deref(),
+            Some("signal-architecture-plan")
+        );
+
+        let mut artifact = ArtifactMetadata::new(
+            message.id.clone(),
+            "screenshot".to_string(),
+            "image/png".to_string(),
+            "abc123".to_string(),
+            123,
+            "file://artifacts/abc123.png".to_string(),
+        );
+        artifact.snapshot_id = Some(snapshot.id.clone());
+        artifact.expires_at = Some(chrono::Utc::now() - chrono::Duration::minutes(1));
+        storage.create_artifact_metadata(&artifact).unwrap();
+
+        let artifacts = storage.list_artifacts_for_message(&message.id).unwrap();
+        assert_eq!(artifacts.len(), 1);
+        assert_eq!(
+            artifacts[0].snapshot_id.as_deref(),
+            Some(snapshot.id.as_str())
+        );
+        assert_eq!(storage.sweep_expired_artifact_metadata().unwrap(), 1);
+        assert!(storage
+            .list_artifacts_for_message(&message.id)
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
